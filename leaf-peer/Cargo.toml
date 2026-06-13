@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["leaf-core", "leaf-host", "vendor/hypercore", "vendor/hypercore-protocol", "vendor/hypercore_schema"]
+exclude = ["leaf-esp32"]
+
+# All hypercore stack crates resolve to our vendored forks (v11 manifest support).
+[patch.crates-io]
+hypercore = { path = "vendor/hypercore", default-features = false }
+hypercore-protocol = { path = "vendor/hypercore-protocol" }
+hypercore_schema = { path = "vendor/hypercore_schema" }
+# snow 0.10.0 manifest bug: feature "std" force-enables optional dep ring ("ring/std"
+# instead of "ring?/std"); ring has no Xtensa support. One-character fix.
+snow = { path = "vendor/snow" }
+# hypercore_handshake 0.6.0 panics via todo!() on any socket error kind other
+# than EOF/ConnectionReset; ESP-IDF async-io surfaces NotConnected during
+# multi-channel sessions, aborting the whole leaf thread. Vendored to end the
+# read cleanly instead (see vendor/hypercore_handshake/src/cipher.rs).
+hypercore_handshake = { path = "vendor/hypercore_handshake" }
+
+[workspace.dependencies]
+hypercore = { path = "vendor/hypercore", default-features = false }
+hypercore-protocol = { path = "vendor/hypercore-protocol" }
+hypercore_schema = { path = "vendor/hypercore_schema" }

@@ -1,0 +1,20 @@
+[package]
+name = "hypercore_schema"
+version = "0.2.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Data structures shared between hypercore and hypercore-protocol"
+documentation = "https://docs.rs/hypercore_schema"
+repository = "https://github.com/cowlicks/hypercore_schema"
+
+[dependencies]
+blake2 = "0.10.6"
+byteorder = "1.5.0"
+compact-encoding = "2.2.0"
+ed25519-dalek = "2.2.0"
+flat-tree = "6.0.0"
+merkle-tree-stream = "0.12.1"
+pretty-hash = "0.4.1"
+
+[dev-dependencies]
+data-encoding = "2.10.0"

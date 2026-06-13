@@ -1,0 +1,31 @@
+[package]
+name = "leaf-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform-independent listam leaf peer: mirrors hypercores over any duplex stream"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["disk"]
+# Disk-backed mirror storage (pulls in hypercore's default features incl.
+# random-access-disk). Disable on embedded targets.
+disk = ["hypercore/default", "hypercore/tokio"]
+
+[dependencies]
+hypercore = { workspace = true, default-features = false, features = ["replication"] }
+hypercore-protocol = { workspace = true }
+hypercore_schema = { workspace = true }
+hypercore_handshake = "0.6"
+uint24le_framing = "0.2"
+async-lock = "3"
+anyhow = "1"
+futures = "0.3"
+async-io = "2"
+serde_json = "1"
+tracing = "0.1"
+# A few key milestones are logged via `log` (not just tracing) so they're
+# visible on the ESP, which captures the `log` crate but installs no tracing
+# subscriber. Using `log` directly (rather than tracing's "log" feature)
+# avoids turning every hypercore-protocol instrument span into UART spam.
+log = "0.4"
+hex = "0.4"

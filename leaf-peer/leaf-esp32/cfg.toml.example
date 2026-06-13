@@ -1,0 +1,18 @@
+# Copy to cfg.toml (gitignored) and fill in. Values are baked in at build time.
+#
+# Up to three known WiFi networks (2.4GHz only — the S3 has no 5GHz radio).
+# At boot and whenever the connection drops, the leaf scans and joins the
+# strongest visible one, falling back through the list.
+[leaf-esp32]
+wifi_ssid = "HomeNetwork"
+wifi_psk = "password1"
+wifi_ssid2 = "OtherNetwork"
+wifi_psk2 = "password2"
+wifi_ssid3 = ""
+wifi_psk3 = ""
+# Comma-separated leaf bridges to dial (e.g. your Mac's IP on each network —
+# run the listam app with LISTAM_LEAF_BRIDGE_PORT=9993). Unreachable ones are
+# retried forever, so it is fine to list addresses from both networks.
+hub_addr = "192.168.1.10:9993,192.168.4.20:9993"
+# Control core key printed by the bridge at startup
+control_key = "0000000000000000000000000000000000000000000000000000000000000000"

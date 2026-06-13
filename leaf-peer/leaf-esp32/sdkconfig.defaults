@@ -1,0 +1,31 @@
+# ESP32-S3 N16R8: 16MB quad flash, 8MB octal PSRAM
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384
+
+# Octal PSRAM as malloc-backed heap: the hypercore stack (noise handshake,
+# merkle state, in-memory cores) lives there.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Watchdog relaxed: replication bursts can hog the executor thread briefly.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+CONFIG_FREERTOS_HZ=1000
+
+# 16MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# Custom partition table with a FAT data partition for persisted cores.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/Users/romme86/Documents/GitHub/listam/hardware/leaf-peer/leaf-esp32/partitions.csv"
+
+# FATFS with long filenames (core dirs are 64-hex discovery keys) and
+# wear-leveling so flash writes spread across the partition.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_WL_SECTOR_SIZE_4096=y

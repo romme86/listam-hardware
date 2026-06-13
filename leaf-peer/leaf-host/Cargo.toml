@@ -1,0 +1,22 @@
+[package]
+name = "leaf-host"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop/server build of the listam leaf peer (TCP transport, disk storage)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+leaf-core = { path = "../leaf-core", features = ["disk"] }
+hypercore = { workspace = true, features = ["default"] }
+hypercore-protocol = { workspace = true }
+hypercore_schema = { workspace = true }
+hypercore_handshake = "0.6"
+uint24le_framing = "0.2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time", "sync", "io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+futures-lite = "1"
+anyhow = "1"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

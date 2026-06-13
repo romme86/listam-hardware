@@ -1,0 +1,43 @@
+[package]
+name = "leaf-esp32"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+description = "listam leaf peer firmware for ESP32-S3 (esp-idf std)"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "leaf-esp32"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+leaf-core = { path = "../leaf-core", default-features = false }
+esp-idf-svc = { version = "0.51", features = ["binstart"] }
+log = "0.4"
+anyhow = "1"
+futures = "0.3"
+async-io = "2"
+hex = "0.4"
+toml-cfg = "0.2"
+
+[build-dependencies]
+embuild = "0.33"
+toml-cfg = "0.2"
+
+# Same vendored hypercore stack as the host workspace.
+[patch.crates-io]
+hypercore = { path = "../vendor/hypercore", default-features = false }
+hypercore-protocol = { path = "../vendor/hypercore-protocol" }
+hypercore_schema = { path = "../vendor/hypercore_schema" }
+snow = { path = "../vendor/snow" }
+# Panics via todo!() on ESP-IDF's NotConnected socket errors in multi-channel
+# sessions; vendored to recover instead of aborting the leaf thread.
+hypercore_handshake = { path = "../vendor/hypercore_handshake" }

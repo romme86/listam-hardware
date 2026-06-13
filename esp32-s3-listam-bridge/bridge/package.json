@@ -1,0 +1,31 @@
+{
+  "name": "esp32-s3-listam-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@listam/backend": "file:../../../listam-mobile/packages/backend",
+    "@listam/client": "file:../../../listam-mobile/packages/client",
+    "@listam/domain": "file:../../../listam-mobile/packages/domain",
+    "@listam/grocery": "file:../../../listam-mobile/packages/grocery",
+    "@listam/i18n": "file:../../../listam-mobile/packages/i18n",
+    "@listam/logging": "file:../../../listam-mobile/packages/logging",
+    "@listam/protocol": "file:../../../listam-mobile/packages/protocol",
+    "@listam/secrets": "file:../../../listam-mobile/packages/secrets",
+    "serialport": "^12.0.0"
+  },
+  "overrides": {
+    "@listam/backend": "file:../../../listam-mobile/packages/backend",
+    "@listam/client": "file:../../../listam-mobile/packages/client",
+    "@listam/domain": "file:../../../listam-mobile/packages/domain",
+    "@listam/grocery": "file:../../../listam-mobile/packages/grocery",
+    "@listam/i18n": "file:../../../listam-mobile/packages/i18n",
+    "@listam/logging": "file:../../../listam-mobile/packages/logging",
+    "@listam/protocol": "file:../../../listam-mobile/packages/protocol",
+    "@listam/secrets": "file:../../../listam-mobile/packages/secrets"
+  }
+}
