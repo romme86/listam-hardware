@@ -22,7 +22,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 # Custom partition table with a FAT data partition for persisted cores.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/Users/romme86/Documents/GitHub/listam/hardware/leaf-peer/leaf-esp32/partitions.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/Users/romme86/Documents/GitHub/listam/listam-hardware/leaf-peer/leaf-esp32/partitions.csv"
 
 # FATFS with long filenames (core dirs are 64-hex discovery keys) and
 # wear-leveling so flash writes spread across the partition.
