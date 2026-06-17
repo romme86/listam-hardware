@@ -19,8 +19,12 @@ use esp_idf_svc::{
     wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
 };
 use futures::FutureExt;
+use esp_idf_svc::hal::gpio::{AnyOutputPin, OutputPin};
 use leaf_core::{MirrorStorage, Registry, run_connection};
 use log::{error, info, warn};
+
+mod led;
+mod voice;
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -42,6 +46,20 @@ pub struct Config {
     hub_addr: &'static str,
     #[default("")]
     control_key: &'static str,
+    /// Side-band TCP host:port the voice thread streams utterances to (the
+    /// headless audio bridge). Empty disables the voice front-end.
+    #[default("")]
+    audio_addr: &'static str,
+    /// Loudness gate: a window must peak at/above this dBFS to wake. Negative;
+    /// -25 ~ a deliberate close "yo".
+    #[default(-25)]
+    wake_db_threshold: i32,
+    /// End the utterance after this many ms below the wake floor.
+    #[default(800)]
+    silence_timeout_ms: i32,
+    /// Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
+    #[default(48)]
+    led_gpio: i32,
 }
 
 /// All configured (ssid, psk) pairs, in priority order.
@@ -110,6 +128,19 @@ fn main() -> anyhow::Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
+    // Claim the voice peripherals before WiFi consumes the modem (disjoint
+    // fields). i2s0 + GPIO4/5/6 (mic) + RMT ch0 + the LED pin are otherwise free.
+    let voice_i2s = peripherals.i2s0;
+    let voice_bclk = peripherals.pins.gpio4;
+    let voice_din = peripherals.pins.gpio6;
+    let voice_ws = peripherals.pins.gpio5;
+    let voice_rmt = peripherals.rmt.channel0;
+    let led_pin: AnyOutputPin = if config.led_gpio == 38 {
+        peripherals.pins.gpio38.downgrade_output()
+    } else {
+        peripherals.pins.gpio48.downgrade_output()
+    };
+
     let mut wifi = BlockingWifi::wrap(
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
         sys_loop,
@@ -133,6 +164,24 @@ fn main() -> anyhow::Result<()> {
                     error!("leaf thread exited: {err:#}");
                 }
             })?;
+    }
+
+    // Voice front-end (optional): capture the mic, gate on loudness, and stream
+    // utterances to the headless audio bridge, with RGB-LED feedback.
+    if !config.audio_addr.is_empty() {
+        let audio_addr = config.audio_addr;
+        let wake_thr = config.wake_db_threshold as f32;
+        let silence_ms = config.silence_timeout_ms.max(100) as u32;
+        std::thread::Builder::new()
+            .name("voice".into())
+            .stack_size(48 * 1024)
+            .spawn(move || {
+                voice::run(
+                    voice_i2s, voice_bclk, voice_din, voice_ws, voice_rmt, led_pin, audio_addr,
+                    wake_thr, silence_ms,
+                )
+            })?;
+        info!("voice front-end enabled (streaming to {})", config.audio_addr);
     }
 
     // WiFi supervisor: a leaf's goal is reaching a hub, not signal bars. Pick

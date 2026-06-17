@@ -16,3 +16,14 @@ wifi_psk3 = ""
 hub_addr = "192.168.1.10:9993,192.168.4.20:9993"
 # Control core key printed by the bridge at startup
 control_key = "0000000000000000000000000000000000000000000000000000000000000000"
+# --- Voice assistant (optional) ---
+# Side-band TCP host:port to stream utterances to (the headless audio bridge,
+# default port 9994). Leave empty to disable the voice front-end entirely.
+audio_addr = ""
+# Loudness gate (dBFS, negative): a window must peak at/above this to wake.
+# -25 ~ a deliberate close "yo"; lower (e.g. -35) is more sensitive.
+wake_db_threshold = -25
+# End the utterance after this many ms below the wake floor.
+silence_timeout_ms = 800
+# Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
+led_gpio = 48

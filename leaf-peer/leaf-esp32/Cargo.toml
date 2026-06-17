@@ -21,6 +21,10 @@ opt-level = "z"
 [dependencies]
 leaf-core = { path = "../leaf-core", default-features = false }
 esp-idf-svc = { version = "0.51", features = ["binstart"] }
+# Re-exported by esp-idf-svc as `esp_idf_svc::hal`; declared directly only to
+# enable the legacy RMT driver (TxRmtDriver/FixedLengthSignal) that drives the
+# onboard WS2812 RGB LED on ESP-IDF v5.
+esp-idf-hal = { version = "0.45", features = ["rmt-legacy"] }
 log = "0.4"
 anyhow = "1"
 futures = "0.3"

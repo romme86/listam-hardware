@@ -1579,6 +1579,7 @@ dependencies = [
  "anyhow",
  "async-io",
  "embuild",
+ "esp-idf-hal",
  "esp-idf-svc",
  "futures",
  "hex",
