@@ -12,7 +12,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use esp_idf_svc::hal::delay::BLOCK;
@@ -42,6 +42,21 @@ fn send_frame(stream: &mut TcpStream, ftype: u8, payload: &[u8]) -> std::io::Res
     let hdr = [body_len as u8, (body_len >> 8) as u8, (body_len >> 16) as u8, ftype];
     stream.write_all(&hdr)?;
     stream.write_all(payload)
+}
+
+// Try each comma-separated host:port (like hub_addr) with a bounded timeout, so
+// an unreachable address can't hang the voice thread.
+fn connect_any(list: &str) -> Option<TcpStream> {
+    for addr in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Ok(mut sas) = addr.to_socket_addrs() {
+            if let Some(sa) = sas.next() {
+                if let Ok(s) = TcpStream::connect_timeout(&sa, Duration::from_millis(1200)) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn run(
@@ -77,7 +92,7 @@ pub fn run(
     }
     info!("[voice] up: wake>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, host {audio_addr}");
 
-    let mut buf = [0u8; READ_BYTES];
+    let mut buf = vec![0u8; READ_BYTES]; // heap, not stack — this thread runs on a small internal-RAM stack
     let mut preroll: VecDeque<Vec<u8>> = VecDeque::new();
     let mut stream: Option<TcpStream> = None;
     let mut silent_ms = 0u32;
@@ -85,7 +100,7 @@ pub fn run(
     let mut blink = 0u32;
 
     loop {
-        let n = mic.read(&mut buf, BLOCK).unwrap_or(0);
+        let n = mic.read(&mut buf[..], BLOCK).unwrap_or(0);
         let frames = n / 4;
         if frames == 0 { continue; }
         let window_ms = (frames as u32 * 1000) / SAMPLE_RATE;
@@ -107,18 +122,26 @@ pub fn run(
                 preroll.push_back(pcm);
                 while preroll.len() > PREROLL_WINDOWS { preroll.pop_front(); }
                 if dbfs >= wake_db_threshold {
-                    match TcpStream::connect(audio_addr) {
-                        Ok(mut s) => {
+                    // Show "listening" the instant the wake fires — independent of
+                    // whether the host is reachable, so the LED reflects local state.
+                    let _ = led.yellow();
+                    info!("[voice] wake ({dbfs:.1} dBFS)");
+                    match connect_any(audio_addr) {
+                        Some(mut s) => {
                             s.set_nodelay(true).ok();
                             let _ = send_frame(&mut s, F_HELLO, b"leaf");
                             let _ = send_frame(&mut s, F_START, &[1, 0, 0, 0, 0]); // wakeWordId=1 (dB gate)
                             for p in preroll.drain(..) { let _ = send_frame(&mut s, F_CHUNK, &p); }
-                            let _ = led.yellow();
                             blink = 0; silent_ms = 0; active_ms = 0;
                             stream = Some(s);
-                            info!("[voice] wake ({dbfs:.1} dBFS) -> streaming");
+                            info!("[voice] streaming");
                         }
-                        Err(err) => { warn!("[voice] connect {audio_addr} failed: {err}"); preroll.clear(); }
+                        None => {
+                            warn!("[voice] no audio host reachable in {audio_addr}");
+                            std::thread::sleep(Duration::from_millis(250));
+                            let _ = led.off();
+                            preroll.clear();
+                        }
                     }
                 }
             }

@@ -172,9 +172,13 @@ fn main() -> anyhow::Result<()> {
         let audio_addr = config.audio_addr;
         let wake_thr = config.wake_db_threshold as f32;
         let silence_ms = config.silence_timeout_ms.max(100) as u32;
+        let free_internal = unsafe {
+            esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL)
+        };
+        info!("free internal RAM before voice thread: {free_internal} bytes");
         std::thread::Builder::new()
             .name("voice".into())
-            .stack_size(48 * 1024)
+            .stack_size(16 * 1024)
             .spawn(move || {
                 voice::run(
                     voice_i2s, voice_bclk, voice_din, voice_ws, voice_rmt, led_pin, audio_addr,
