@@ -50,7 +50,7 @@ fn connect_any(list: &str) -> Option<TcpStream> {
     for addr in list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
         if let Ok(mut sas) = addr.to_socket_addrs() {
             if let Some(sa) = sas.next() {
-                if let Ok(s) = TcpStream::connect_timeout(&sa, Duration::from_millis(1200)) {
+                if let Ok(s) = TcpStream::connect_timeout(&sa, Duration::from_millis(600)) {
                     return Some(s);
                 }
             }
@@ -94,10 +94,12 @@ pub fn run(
 
     let mut buf = vec![0u8; READ_BYTES]; // heap, not stack — this thread runs on a small internal-RAM stack
     let mut preroll: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut listening = false;
     let mut stream: Option<TcpStream> = None;
     let mut silent_ms = 0u32;
-    let mut active_ms = 0u32;
+    let mut listen_ms = 0u32;
     let mut blink = 0u32;
+    let _ = led.off();
 
     loop {
         let n = mic.read(&mut buf[..], BLOCK).unwrap_or(0);
@@ -117,59 +119,68 @@ pub fn run(
         }
         let dbfs = if peak > 0 { 20.0 * (peak as f32 / FULL_SCALE_24BIT).log10() } else { -120.0 };
 
-        match stream {
-            None => {
-                preroll.push_back(pcm);
-                while preroll.len() > PREROLL_WINDOWS { preroll.pop_front(); }
-                if dbfs >= wake_db_threshold {
-                    // Show "listening" the instant the wake fires — independent of
-                    // whether the host is reachable, so the LED reflects local state.
-                    let _ = led.yellow();
-                    info!("[voice] wake ({dbfs:.1} dBFS)");
-                    match connect_any(audio_addr) {
-                        Some(mut s) => {
-                            s.set_nodelay(true).ok();
-                            let _ = send_frame(&mut s, F_HELLO, b"leaf");
-                            let _ = send_frame(&mut s, F_START, &[1, 0, 0, 0, 0]); // wakeWordId=1 (dB gate)
-                            for p in preroll.drain(..) { let _ = send_frame(&mut s, F_CHUNK, &p); }
-                            blink = 0; silent_ms = 0; active_ms = 0;
-                            stream = Some(s);
-                            info!("[voice] streaming");
-                        }
-                        None => {
-                            warn!("[voice] no audio host reachable in {audio_addr}");
-                            std::thread::sleep(Duration::from_millis(250));
-                            let _ = led.off();
-                            preroll.clear();
-                        }
+        if !listening {
+            // IDLE — LED off, waiting for the wake word. Keep a short pre-roll.
+            preroll.push_back(pcm);
+            while preroll.len() > PREROLL_WINDOWS { preroll.pop_front(); }
+            if dbfs >= wake_db_threshold {
+                info!("[voice] wake ({dbfs:.1} dBFS) — listening");
+                let _ = led.yellow();
+                listening = true;
+                listen_ms = 0;
+                silent_ms = 0;
+                blink = 0;
+                // Connect if a host is reachable; either way we listen locally for
+                // the command window, so the LED + countdown work with no host too.
+                stream = connect_any(audio_addr);
+                match stream {
+                    Some(ref mut s) => {
+                        s.set_nodelay(true).ok();
+                        let _ = send_frame(s, F_HELLO, b"leaf");
+                        let _ = send_frame(s, F_START, &[1, 0, 0, 0, 0]); // wakeWordId=1 (dB gate)
+                        for p in preroll.drain(..) { let _ = send_frame(s, F_CHUNK, &p); }
+                        info!("[voice] streaming to host");
+                    }
+                    None => {
+                        warn!("[voice] no audio host reachable in {audio_addr}");
+                        preroll.clear();
                     }
                 }
             }
-            Some(ref mut s) => {
+        } else {
+            // LISTENING — blink yellow, stream if connected, and count down to the
+            // end of the command: silence_timeout_ms of quiet, or the max window.
+            blink += 1;
+            let _ = if (blink / 4) % 2 == 0 { led.yellow() } else { led.off() };
+
+            if let Some(ref mut s) = stream {
                 if send_frame(s, F_CHUNK, &pcm).is_err() {
                     warn!("[voice] stream dropped");
-                    let _ = led.off();
                     stream = None;
-                    continue;
                 }
-                active_ms += window_ms;
-                if dbfs < wake_db_threshold - 10.0 { silent_ms += window_ms; } else { silent_ms = 0; }
+            }
 
-                // Blink yellow ~every 320 ms while listening.
-                blink += 1;
-                let _ = if (blink / 5) % 2 == 0 { led.yellow() } else { led.off() };
+            listen_ms += window_ms;
+            // Silence = below the wake level: the command stays alive while sound
+            // exceeds the gate and ends once it drops back to ambient. (A fixed
+            // lower floor never registered silence in a normal-noise room.)
+            if dbfs < wake_db_threshold { silent_ms += window_ms; } else { silent_ms = 0; }
 
-                if silent_ms >= silence_timeout_ms || active_ms >= MAX_UTTERANCE_MS {
-                    let reason = if active_ms >= MAX_UTTERANCE_MS { 1u8 } else { 0u8 };
+            if silent_ms >= silence_timeout_ms || listen_ms >= MAX_UTTERANCE_MS {
+                let reason = if listen_ms >= MAX_UTTERANCE_MS { 1u8 } else { 0u8 };
+                if let Some(ref mut s) = stream {
                     let _ = send_frame(s, F_END, &[reason]);
                     let _ = s.flush();
-                    let _ = led.green(); // "sending"
+                    let _ = led.green(); // command captured -> sending
                     std::thread::sleep(Duration::from_millis(350));
-                    let _ = led.off();
                     let _ = s.shutdown(Shutdown::Both);
-                    info!("[voice] utterance sent ({active_ms} ms, reason {reason})");
-                    stream = None;
+                    info!("[voice] command sent ({listen_ms} ms, reason {reason})");
+                } else {
+                    info!("[voice] listening window ended ({listen_ms} ms, no host)");
                 }
+                let _ = led.off();
+                stream = None;
+                listening = false;
             }
         }
     }
