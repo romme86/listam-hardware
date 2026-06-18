@@ -31,6 +31,10 @@ futures = "0.3"
 async-io = "2"
 hex = "0.4"
 toml-cfg = "0.2"
+# Decode the BLE provisioning payload (JSON) written into NVS. Flash budget is
+# ample (~3MB free); serde_json is the least error-prone way to parse it.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 embuild = "0.33"
@@ -47,6 +51,15 @@ remote_component = { name = "espressif/esp-tflite-micro", version = "1.*" }
 component_dirs = ["components/mww"]
 bindings_header = "components/mww/mww.h"
 bindings_module = "mww"
+
+# --- BLE provisioning (NimBLE GATT) ---
+# A tiny C shim over NimBLE exposing a custom provisioning GATT service; bound
+# into Rust as `esp_idf_svc::sys::leaf_prov`. Needs BT/NimBLE enabled in
+# sdkconfig.defaults. See components/leaf_prov/ and src/provisioning.rs.
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/leaf_prov"]
+bindings_header = "components/leaf_prov/leaf_prov.h"
+bindings_module = "leaf_prov"
 
 # Same vendored hypercore stack as the host workspace.
 [patch.crates-io]

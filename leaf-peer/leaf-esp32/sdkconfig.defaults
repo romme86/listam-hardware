@@ -29,3 +29,21 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/Users/romme86/Documents/GitHub/listam/l
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_WL_SECTOR_SIZE_4096=y
+
+# --- BLE provisioning (NimBLE peripheral) ---
+# Enables the BT controller + NimBLE host so the leaf can advertise the
+# provisioning GATT service (components/leaf_prov) when it boots unprovisioned.
+# NimBLE-only (no Bluedroid) keeps the footprint small; the controller RAM is
+# fully reclaimed by the esp_restart() after provisioning succeeds. Peripheral
+# role only, a single connection. The larger preferred MTU lets the central
+# send fewer, bigger config chunks (the framing still works at the 23-byte
+# default). If a build runs short on internal RAM, tune the BLE IRAM/heap
+# options via `idf.py menuconfig` (Component config → Bluetooth).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247

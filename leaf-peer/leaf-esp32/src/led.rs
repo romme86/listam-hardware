@@ -82,4 +82,9 @@ impl<'d> Led<'d> {
     pub fn red(&mut self) -> Result<()> {
         self.write_grb(0, 48, 0)
     }
+
+    /// Blue = BLE provisioning mode (advertising, waiting for an app to pair).
+    pub fn blue(&mut self) -> Result<()> {
+        self.write_grb(0, 0, 48)
+    }
 }

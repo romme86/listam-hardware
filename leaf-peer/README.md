@@ -91,7 +91,7 @@ the Xtensa toolchain (`espup install --targets esp32s3`), plus
 
 ```sh
 cd hardware/leaf-peer/leaf-esp32
-cp cfg.toml.example cfg.toml   # wifi networks (up to 3) + hub_addr + control_key
+cp cfg.toml.example cfg.toml   # wifi (up to 3) + hub_addr + control_key — or leave blank to provision over BLE (see below)
 . ~/export-esp.sh
 cargo build --release
 espflash flash --monitor --flash-size 16mb target/xtensa-esp32s3-espidf/release/leaf-esp32
@@ -129,6 +129,31 @@ Two flashing notes:
   --long_name_support`, and `espflash write-bin 0x310000 image.img`. The board
   reloads those cores on boot. (This is also how persistence was validated
   where the only WiFi available had client isolation.)
+
+### BLE provisioning (set up over Bluetooth, no cfg.toml needed)
+
+A leaf flashed with an **empty / incomplete `cfg.toml`** boots into *provisioning
+mode* (blue LED) and advertises a small BLE GATT service. Any listam app then
+writes its WiFi credentials + this project's control key + hub address over
+Bluetooth; the leaf persists them to NVS and reboots into the normal path above.
+A board with a **complete** baked `cfg.toml` never enters provisioning, so
+existing boards are unaffected.
+
+- **Headless**: with the bridge running, send the `provision-leaf` op (see the
+  listam-headless README). Needs the optional `@abandonware/noble` dependency +
+  a BLE radio on the host.
+- **Mobile** (Settings → *Pair a leaf*) and **Desktop** (Peers & Devices →
+  *Pair over Bluetooth*) read the control key + hub address from the hub they
+  already track and write them over react-native-ble-plx / Web Bluetooth.
+- The wire contract (service/characteristic UUIDs, payload schema, CRC framing)
+  lives in `@listam/provisioning`; the firmware side is `components/leaf_prov`
+  (a NimBLE C shim) + `src/config.rs` (NVS-backed runtime config) +
+  `src/provisioning.rs`. `cfg.toml` stays as a factory-default fallback.
+- **Trust (v1):** the payload is sent in cleartext, trusting physical BLE
+  proximity; a version field is reserved for a future PIN/encryption upgrade.
+- To re-provision a configured board, clear its NVS record (or press
+  **BOOT/GPIO0** just after power-on — best-effort, since GPIO0 is a strapping
+  pin); the easiest test path is simply flashing a blank `cfg.toml`.
 
 ### ESP-specific gotchas (all handled, noted for the next board)
 

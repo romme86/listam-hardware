@@ -1,5 +1,9 @@
 # Copy to cfg.toml (gitignored) and fill in. Values are baked in at build time.
 #
+# Alternatively, leave these blank/incomplete and flash as-is: the leaf then
+# boots into BLE provisioning mode (blue LED) and a listam app fills the same
+# fields over Bluetooth, persisting them to NVS (see the leaf-peer README).
+#
 # Up to three known WiFi networks (2.4GHz only — the S3 has no 5GHz radio).
 # At boot and whenever the connection drops, the leaf scans and joins the
 # strongest visible one, falling back through the list.

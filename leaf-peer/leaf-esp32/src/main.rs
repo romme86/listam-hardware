@@ -23,7 +23,9 @@ use esp_idf_svc::hal::gpio::{AnyOutputPin, OutputPin};
 use leaf_core::{MirrorStorage, Registry, run_connection};
 use log::{error, info, warn};
 
+mod config;
 mod led;
+mod provisioning;
 mod voice;
 
 #[toml_cfg::toml_config]
@@ -62,16 +64,23 @@ pub struct Config {
     led_gpio: i32,
 }
 
-/// All configured (ssid, psk) pairs, in priority order.
-fn known_networks(config: &Config) -> Vec<(&'static str, &'static str)> {
-    [
-        (config.wifi_ssid, config.wifi_psk),
-        (config.wifi_ssid2, config.wifi_psk2),
-        (config.wifi_ssid3, config.wifi_psk3),
-    ]
-    .into_iter()
-    .filter(|(ssid, _)| !ssid.is_empty())
-    .collect()
+/// BLE name the leaf advertises in provisioning mode: a stable per-device
+/// suffix from the efuse MAC, e.g. "listam-leaf-3F7A".
+fn device_name() -> String {
+    let mut mac = [0u8; 6];
+    unsafe {
+        esp_idf_svc::sys::esp_efuse_mac_get_default(mac.as_mut_ptr());
+    }
+    format!("listam-leaf-{:02X}{:02X}", mac[4], mac[5])
+}
+
+/// True if the BOOT button (GPIO0) is held low at power-on — used to force
+/// re-provisioning even on an already-configured board. GPIO0 is a strapping
+/// pin, so this is read once after boot. Any error reads as "not held".
+fn boot_button_held(pin: esp_idf_svc::hal::gpio::Gpio0) -> bool {
+    esp_idf_svc::hal::gpio::PinDriver::input(pin)
+        .map(|driver| driver.is_low())
+        .unwrap_or(false)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -113,21 +122,30 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let config = CONFIG;
-    let networks = known_networks(&config);
-    if networks.is_empty() || config.hub_addr.is_empty() || config.control_key.is_empty() {
-        error!("cfg.toml is missing wifi networks / hub_addr / control_key — see cfg.toml.example");
-        return Err(anyhow!("missing configuration"));
-    }
-    let control_key: [u8; 32] = hex::decode(config.control_key)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .context("control_key must be 64 hex chars")?;
+    let baked = CONFIG;
 
     let peripherals = Peripherals::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
+    // Resolve the runtime configuration. Precedence: an NVS record written by
+    // BLE provisioning > a complete baked cfg.toml (backward compatibility) >
+    // none → enter BLE provisioning mode. Holding BOOT (GPIO0) at power-on
+    // forces re-provisioning even on an already-configured board.
+    let provisioned = config::load(&nvs).unwrap_or_else(|err| {
+        warn!("reading provisioning record failed ({err:#}); ignoring");
+        None
+    });
+    let force_reprovision = boot_button_held(peripherals.pins.gpio0);
+    let runtime = if force_reprovision {
+        None
+    } else {
+        provisioned.or_else(|| config::from_toml(&baked))
+    };
+
+    // The LED pin/channel is shared between provisioning status and the voice
+    // front-end; pick the pin from the effective config (runtime overrides baked).
+    let led_gpio = runtime.as_ref().map(|rc| rc.led_gpio).unwrap_or(baked.led_gpio);
     // Claim the voice peripherals before WiFi consumes the modem (disjoint
     // fields). i2s0 + GPIO4/5/6 (mic) + RMT ch0 + the LED pin are otherwise free.
     let voice_i2s = peripherals.i2s0;
@@ -135,11 +153,53 @@ fn main() -> anyhow::Result<()> {
     let voice_din = peripherals.pins.gpio6;
     let voice_ws = peripherals.pins.gpio5;
     let voice_rmt = peripherals.rmt.channel0;
-    let led_pin: AnyOutputPin = if config.led_gpio == 38 {
+    let led_pin: AnyOutputPin = if led_gpio == 38 {
         peripherals.pins.gpio38.downgrade_output()
     } else {
         peripherals.pins.gpio48.downgrade_output()
     };
+
+    // Unprovisioned (or a forced re-pair): advertise over BLE and wait for a
+    // listam app to write WiFi creds + the control key. We start neither WiFi
+    // nor the leaf/voice threads here, leaving internal RAM free for the BLE
+    // stack; on success the config is stored to NVS and the leaf reboots into
+    // the normal path below.
+    let Some(runtime) = runtime else {
+        if force_reprovision {
+            info!("BOOT held at power-on — forcing re-provisioning");
+        } else {
+            info!("no configuration found — entering BLE provisioning mode");
+        }
+        let mut led = led::Led::new(voice_rmt, led_pin)?;
+        let name = device_name();
+        if let Err(err) = provisioning::run(&nvs, &mut led, &name) {
+            error!("provisioning failed to start ({err:#}); rebooting");
+        }
+        // provisioning::run loops until success then esp_restart()s; reaching
+        // here is only a startup-error path — restart to retry cleanly.
+        unsafe { esp_idf_svc::sys::esp_restart() };
+        unreachable!("esp_restart does not return");
+    };
+
+    // --- Normal (provisioned) path -------------------------------------------
+    // toml_cfg yields &'static str; the runtime values are owned. The config
+    // lives for the whole program, so leak the owned strings to &'static str
+    // and keep every downstream signature unchanged.
+    let control_key = runtime.control_key;
+    let hub_addr: &'static str = Box::leak(runtime.hub_addr.into_boxed_str());
+    let audio_addr: &'static str = Box::leak(runtime.audio_addr.into_boxed_str());
+    let wake_db_threshold = runtime.wake_db_threshold;
+    let silence_timeout_ms = runtime.silence_timeout_ms;
+    let networks: Vec<(&'static str, &'static str)> = runtime
+        .networks
+        .into_iter()
+        .map(|(ssid, psk)| {
+            (
+                &*Box::leak(ssid.into_boxed_str()),
+                &*Box::leak(psk.into_boxed_str()),
+            )
+        })
+        .collect();
 
     let mut wifi = BlockingWifi::wrap(
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
@@ -161,9 +221,7 @@ fn main() -> anyhow::Result<()> {
             .name("leaf".into())
             .stack_size(96 * 1024)
             .spawn(move || {
-                if let Err(err) =
-                    leaf_main(control_key, config.hub_addr, hub_reachable, storage_root)
-                {
+                if let Err(err) = leaf_main(control_key, hub_addr, hub_reachable, storage_root) {
                     error!("leaf thread exited: {err:#}");
                 }
             });
@@ -174,10 +232,9 @@ fn main() -> anyhow::Result<()> {
 
     // Voice front-end (optional): capture the mic, gate on loudness, and stream
     // utterances to the headless audio bridge, with RGB-LED feedback.
-    if !config.audio_addr.is_empty() {
-        let audio_addr = config.audio_addr;
-        let wake_thr = config.wake_db_threshold as f32;
-        let silence_ms = config.silence_timeout_ms.max(100) as u32;
+    if !audio_addr.is_empty() {
+        let wake_thr = wake_db_threshold as f32;
+        let silence_ms = silence_timeout_ms.max(100) as u32;
         let free_internal = unsafe {
             esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL)
         };
@@ -191,7 +248,7 @@ fn main() -> anyhow::Result<()> {
                     wake_thr, silence_ms,
                 )
             })?;
-        info!("voice front-end enabled (streaming to {})", config.audio_addr);
+        info!("voice front-end enabled (streaming to {audio_addr})");
     }
 
     // WiFi supervisor: a leaf's goal is reaching a hub, not signal bars. Pick
