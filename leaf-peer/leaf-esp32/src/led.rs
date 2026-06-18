@@ -1,7 +1,9 @@
 //! Onboard addressable RGB LED (WS2812/SK68xx) status indicator, driven over the
 //! RMT peripheral. The DevKitC-1's single LED is on GPIO48 (v1.0) or GPIO38
-//! (v1.1) — selected by `led_gpio` in cfg.toml. Used by the voice thread:
-//! off = idle, blinking yellow = awake/listening, solid green = sending.
+//! (v1.1) — selected by `led_gpio` in cfg.toml. Used by the voice thread, but
+//! the colors are driven by the HOST over the voice socket (not the local dB
+//! gate): off = idle/capturing, yellow = wake word recognized, purple = command
+//! recognized, green = saved, red = error.
 
 use std::time::Duration;
 
@@ -67,7 +69,17 @@ impl<'d> Led<'d> {
         self.write_grb(40, 40, 0)
     }
 
+    /// Purple = red + blue.
+    pub fn purple(&mut self) -> Result<()> {
+        self.write_grb(0, 40, 40)
+    }
+
     pub fn green(&mut self) -> Result<()> {
         self.write_grb(48, 0, 0)
+    }
+
+    /// Red = error / command not understood.
+    pub fn red(&mut self) -> Result<()> {
+        self.write_grb(0, 48, 0)
     }
 }

@@ -36,6 +36,18 @@ toml-cfg = "0.2"
 embuild = "0.33"
 toml-cfg = "0.2"
 
+# --- On-device wake word (microWakeWord "yo") ---
+# Pull Espressif's TFLite-Micro port + our C-ABI shim (components/mww) so the
+# leaf can run the int8 streaming model as a first-stage filter behind the dB
+# gate. esp-nn is bundled (S3 SIMD). Pin if a future esp-nn bump breaks the arena.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp-tflite-micro", version = "1.*" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/mww"]
+bindings_header = "components/mww/mww.h"
+bindings_module = "mww"
+
 # Same vendored hypercore stack as the host workspace.
 [patch.crates-io]
 hypercore = { path = "../vendor/hypercore", default-features = false }

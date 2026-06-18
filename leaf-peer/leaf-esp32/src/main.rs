@@ -154,7 +154,10 @@ fn main() -> anyhow::Result<()> {
 
     {
         let hub_reachable = hub_reachable.clone();
-        std::thread::Builder::new()
+        // Non-fatal: if the 96KB mirror thread can't get a stack (tight internal
+        // RAM, e.g. with the wake-word model linked), the voice/wake front-end
+        // (16KB) should still run rather than taking the whole leaf down.
+        let spawned = std::thread::Builder::new()
             .name("leaf".into())
             .stack_size(96 * 1024)
             .spawn(move || {
@@ -163,7 +166,10 @@ fn main() -> anyhow::Result<()> {
                 {
                     error!("leaf thread exited: {err:#}");
                 }
-            })?;
+            });
+        if let Err(e) = spawned {
+            error!("leaf mirror thread failed to spawn ({e}); voice front-end still runs");
+        }
     }
 
     // Voice front-end (optional): capture the mic, gate on loudness, and stream
