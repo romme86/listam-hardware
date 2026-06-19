@@ -1585,6 +1585,8 @@ dependencies = [
  "hex",
  "leaf-core",
  "log",
+ "serde",
+ "serde_json",
  "toml-cfg",
 ]
 
