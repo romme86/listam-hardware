@@ -183,15 +183,15 @@ fn main() -> anyhow::Result<()> {
 
     // --- Normal (provisioned) path -------------------------------------------
     // Normal mode never uses Bluetooth (only provisioning mode does), but BT is
-    // enabled in sdkconfig, so its controller reserves internal RAM at boot.
-    // Release it back to the heap so the 96KB leaf mirror thread can allocate
-    // its stack — otherwise it fails to spawn (ENOMEM) and the leaf never dials
-    // the hub. Safe here because the controller is never initialized on this
-    // path; re-provisioning happens only via a reboot into the branch above.
+    // enabled in sdkconfig, so the controller + NimBLE host reserve internal RAM
+    // at boot. Release ALL of it back to the heap (esp_bt_mem_release frees both
+    // the controller and the host BSS, vs esp_bt_controller_mem_release which
+    // frees only the controller) — otherwise the 96KB leaf mirror thread can't
+    // get a stack (ENOMEM), especially alongside the voice front-end, and the
+    // leaf never dials the hub. Safe here: BT is never initialized on this path;
+    // re-provisioning happens only via a reboot into the branch above.
     unsafe {
-        esp_idf_svc::sys::esp_bt_controller_mem_release(
-            esp_idf_svc::sys::esp_bt_mode_t_ESP_BT_MODE_BTDM,
-        );
+        esp_idf_svc::sys::esp_bt_mem_release(esp_idf_svc::sys::esp_bt_mode_t_ESP_BT_MODE_BTDM);
     }
 
     // toml_cfg yields &'static str; the runtime values are owned. The config
