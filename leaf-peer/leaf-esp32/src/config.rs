@@ -91,7 +91,7 @@ fn payload_to_runtime(p: &Payload) -> Result<RuntimeConfig, String> {
         control_key,
         audio_addr: p.audio_addr.clone().unwrap_or_default(),
         wake_db_threshold: p.wake_db_threshold.unwrap_or(-25),
-        silence_timeout_ms: p.silence_timeout_ms.unwrap_or(800),
+        silence_timeout_ms: p.silence_timeout_ms.unwrap_or(500),
         led_gpio: p.led_gpio.unwrap_or(48),
     })
 }

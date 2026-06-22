@@ -56,8 +56,12 @@ pub struct Config {
     /// -25 ~ a deliberate close "yo".
     #[default(-25)]
     wake_db_threshold: i32,
-    /// End the utterance after this many ms below the wake floor.
-    #[default(800)]
+    /// End the utterance after this many ms below the wake floor. 500ms is the
+    /// latency/accuracy sweet spot: it declares "done" ~300ms sooner than the old
+    /// 800ms default (only trailing silence is trimmed; mid-command speech keeps
+    /// resetting the timer), while staying above the ~400ms where slow speakers'
+    /// intra-phrase pauses would split one command into two.
+    #[default(500)]
     silence_timeout_ms: i32,
     /// Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
     #[default(48)]

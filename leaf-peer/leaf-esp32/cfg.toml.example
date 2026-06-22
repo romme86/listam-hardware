@@ -29,7 +29,8 @@ audio_addr = ""
 # speaking voice from 2-3 m across a room. Watch the serial dBFS print to tune:
 # lower (toward -45) if "yo" doesn't trigger, raise (toward -30) on false wakes.
 wake_db_threshold = -40
-# End the utterance after this many ms below the wake floor.
-silence_timeout_ms = 800
+# End the utterance after this many ms of trailing silence (below the wake floor).
+# 500ms = the latency/accuracy sweet spot; below ~400ms slow speech can split.
+silence_timeout_ms = 500
 # Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
 led_gpio = 48
