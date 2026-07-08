@@ -36,7 +36,13 @@ use crate::led::Led;
 const SAMPLE_RATE: u32 = 16_000;
 const FULL_SCALE_24BIT: f32 = 8_388_608.0;
 const READ_BYTES: usize = 4096; // 1024 frames (32-bit slot) ~= 64 ms @ 16 kHz
-const MAX_UTTERANCE_MS: u32 = 12_000;
+// Max capture window per utterance (wake word + command). Kitchen data showed
+// far-field noise keeps the dB gate open so most utterances ride to this cap —
+// at 12 s that meant ~8 s of dead recording after a ~3 s command before the
+// host even started transcribing. 4 s fits "yo" + a normal list command
+// ("yo aggiungi passata di pomodoro" ≈ 3.5 s); the host-side assembler cap
+// (voice.maxUtteranceSeconds) mirrors this bound server-side.
+const MAX_UTTERANCE_MS: u32 = 4_000;
 const PREROLL_WINDOWS: usize = 4; // ~256 ms kept before the wake fires
 
 // On-device microWakeWord fire threshold. The model emits uint8/256 probability;
