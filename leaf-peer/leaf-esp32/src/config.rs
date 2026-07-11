@@ -30,6 +30,7 @@ pub struct RuntimeConfig {
     pub audio_addr: String,
     pub wake_db_threshold: i32,
     pub silence_timeout_ms: i32,
+    pub mic_gain_shift: i32,
     pub led_gpio: i32,
 }
 
@@ -52,6 +53,10 @@ struct Payload {
     wake_db_threshold: Option<i32>,
     #[serde(default)]
     silence_timeout_ms: Option<i32>,
+    // Digital mic gain shift (see main.rs Config). Optional so payloads written
+    // by older apps keep decoding; absent means the firmware default.
+    #[serde(default)]
+    mic_gain_shift: Option<i32>,
     #[serde(default)]
     led_gpio: Option<i32>,
 }
@@ -92,6 +97,7 @@ fn payload_to_runtime(p: &Payload) -> Result<RuntimeConfig, String> {
         audio_addr: p.audio_addr.clone().unwrap_or_default(),
         wake_db_threshold: p.wake_db_threshold.unwrap_or(-25),
         silence_timeout_ms: p.silence_timeout_ms.unwrap_or(500),
+        mic_gain_shift: p.mic_gain_shift.unwrap_or(3),
         led_gpio: p.led_gpio.unwrap_or(48),
     })
 }
@@ -157,6 +163,7 @@ pub fn from_toml(config: &Config) -> Option<RuntimeConfig> {
         audio_addr: config.audio_addr.to_string(),
         wake_db_threshold: config.wake_db_threshold,
         silence_timeout_ms: config.silence_timeout_ms,
+        mic_gain_shift: config.mic_gain_shift,
         led_gpio: config.led_gpio,
     })
 }

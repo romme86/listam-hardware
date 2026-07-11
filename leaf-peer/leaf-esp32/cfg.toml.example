@@ -32,5 +32,10 @@ wake_db_threshold = -40
 # End the utterance after this many ms of trailing silence (below the wake floor).
 # 500ms = the latency/accuracy sweet spot; below ~400ms slow speech can split.
 silence_timeout_ms = 500
+# Digital mic gain: left-shift applied to the 24-bit sample before PCM16
+# extraction. 0 = none (old top-16-bits behavior), 3 = 8x (+18 dB, default —
+# the INMP441 runs quiet), max 8. Saturating; raise if speech still peaks
+# below ~-12 dBFS on the host, lower if close speech clips.
+mic_gain_shift = 3
 # Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
 led_gpio = 48

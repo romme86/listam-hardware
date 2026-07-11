@@ -63,6 +63,13 @@ pub struct Config {
     /// intra-phrase pauses would split one command into two.
     #[default(500)]
     silence_timeout_ms: i32,
+    /// Digital mic gain as a left-shift on the 24-bit sample before PCM16
+    /// extraction: 0 = top 16 bits (old behavior), 3 = 8x (+18 dB). The INMP441
+    /// path runs quiet (measured speech peaks near -30 dBFS = at the room's
+    /// noise floor), which starves both the wake model and host STT; 3 restores
+    /// a healthy level. Saturating, so loud close speech clips instead of wrapping.
+    #[default(3)]
+    mic_gain_shift: i32,
     /// Onboard addressable RGB LED pin: 48 (DevKitC-1 v1.0) or 38 (v1.1).
     #[default(48)]
     led_gpio: i32,
@@ -206,6 +213,7 @@ fn main() -> anyhow::Result<()> {
     let audio_addr: &'static str = Box::leak(runtime.audio_addr.into_boxed_str());
     let wake_db_threshold = runtime.wake_db_threshold;
     let silence_timeout_ms = runtime.silence_timeout_ms;
+    let runtime_mic_gain_shift = runtime.mic_gain_shift;
     let networks: Vec<(&'static str, &'static str)> = runtime
         .networks
         .into_iter()
@@ -251,6 +259,7 @@ fn main() -> anyhow::Result<()> {
     if !audio_addr.is_empty() {
         let wake_thr = wake_db_threshold as f32;
         let silence_ms = silence_timeout_ms.max(100) as u32;
+        let gain_shift = runtime_mic_gain_shift.clamp(0, 8) as u32;
         let free_internal = unsafe {
             esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL)
         };
@@ -261,7 +270,7 @@ fn main() -> anyhow::Result<()> {
             .spawn(move || {
                 voice::run(
                     voice_i2s, voice_bclk, voice_din, voice_ws, voice_rmt, led_pin, audio_addr,
-                    wake_thr, silence_ms,
+                    wake_thr, silence_ms, gain_shift,
                 )
             })?;
         info!("voice front-end enabled (streaming to {audio_addr})");

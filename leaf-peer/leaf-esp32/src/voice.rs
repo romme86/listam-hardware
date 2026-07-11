@@ -49,6 +49,15 @@ const PREROLL_WINDOWS: usize = 4; // ~256 ms kept before the wake fires
 // 0.90 ≈ raw uint8 ≥ 230. Tune alongside the /64 feature scale once calibrated.
 const WAKE_PROB_CUTOFF: f32 = 0.90;
 
+// After the wake word fires, allow a natural pause before the command starts:
+// people say "yo", see the yellow light, THEN speak. Until post-wake speech is
+// heard, silence is budgeted at this floor instead of silence_timeout_ms (500ms
+// would close the window mid-pause and the command would arrive as a separate,
+// wake-less utterance — the "yellow flashes then nothing" failure). Once the
+// command starts, the normal (shorter) end-of-speech timeout applies again.
+// The 4s utterance cap still bounds the whole exchange.
+const POST_WAKE_SILENCE_MS: u32 = 1_500;
+
 const F_HELLO: u8 = 0x00;
 const F_START: u8 = 0x01;
 const F_CHUNK: u8 = 0x02;
@@ -197,6 +206,7 @@ pub fn run(
     audio_addr: &'static str,
     wake_db_threshold: f32,
     silence_timeout_ms: u32,
+    mic_gain_shift: u32,
 ) {
     let mut led = match Led::new(rmt, led_pin) {
         Ok(l) => l,
@@ -218,7 +228,7 @@ pub fn run(
         warn!("[voice] I2S rx_enable failed: {err:#}");
         return;
     }
-    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, host {audio_addr}");
+    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, mic gain {}x, host {audio_addr}", 1u32 << mic_gain_shift);
 
     // Load the on-device wake model once. rc=0 ok; <0 = model/version/arena/op
     // error (validates AllocateTensors + the 64KB arena + streaming resource vars
@@ -232,10 +242,14 @@ pub fn run(
     let mut preroll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut listening = false;
     let mut wake_fired = false; // on-device mww crossed the cutoff this utterance
+    let mut wake_pause_seen = false; // a quiet window occurred after the wake fired
+    let mut spoke_after_wake = false; // speech resumed after that post-wake pause
     let mut win_n = 0u32; // audio windows fed to mww this utterance (calibration summary)
     let mut stream: Option<TcpStream> = None;
     let mut silent_ms = 0u32;
     let mut listen_ms = 0u32;
+    // PCM16 extraction shift: 16 = plain top-16-bits, minus the digital gain.
+    let pcm_shift = 16u32.saturating_sub(mic_gain_shift.min(8));
     let _ = led.off();
 
     loop {
@@ -244,9 +258,12 @@ pub fn run(
         if frames == 0 { continue; }
         let window_ms = (frames as u32 * 1000) / SAMPLE_RATE;
 
-        // One pass: peak (24-bit, for dBFS) + PCM16 (top 16 bits of each slot word).
-        // Keep samples as i16 — wire bytes come from pcm16_as_bytes() and the wake
-        // model wants an aligned *const i16.
+        // One pass: peak (24-bit, for dBFS — always from the UNgained sample so
+        // the gate threshold keeps its room calibration) + PCM16 with digital
+        // gain (a smaller right-shift keeps more of the 24-bit sample's low
+        // bits, saturating on loud close speech). Keep samples as i16 — wire
+        // bytes come from pcm16_as_bytes() and the wake model wants an aligned
+        // *const i16.
         let mut peak: i32 = 0;
         let mut pcm16: Vec<i16> = Vec::with_capacity(frames);
         for f in 0..frames {
@@ -254,7 +271,8 @@ pub fn run(
             let raw = i32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
             let mag = (raw >> 8).abs();
             if mag > peak { peak = mag; }
-            pcm16.push((raw >> 16) as i16);
+            let amplified = (raw >> pcm_shift).clamp(i16::MIN as i32, i16::MAX as i32);
+            pcm16.push(amplified as i16);
         }
         let dbfs = if peak > 0 { 20.0 * (peak as f32 / FULL_SCALE_24BIT).log10() } else { -120.0 };
 
@@ -270,6 +288,8 @@ pub fn run(
                 info!("[voice] sound gate open ({dbfs:.1} dBFS) — capturing");
                 listening = true;
                 wake_fired = false;
+                wake_pause_seen = false;
+                spoke_after_wake = false;
                 win_n = 0;
                 listen_ms = 0;
                 silent_ms = 0;
@@ -299,7 +319,13 @@ pub fn run(
             // LED yellow locally the instant "yo" is matched) and stream the audio,
             // counting down to the end of the command: silence_timeout_ms of quiet,
             // or the max window.
+            let was_fired = wake_fired;
             mww_step(&pcm16, &mut wake_fired, &mut led);
+            if wake_fired && !was_fired {
+                // Wake just fired: open the post-wake grace so the user's pause
+                // between "yo" and the command doesn't close the window.
+                silent_ms = 0;
+            }
             win_n += 1;
             if let Some(ref mut s) = stream {
                 if send_frame(s, F_CHUNK, pcm16_as_bytes(&pcm16)).is_err() {
@@ -312,9 +338,25 @@ pub fn run(
             // Silence = below the wake level: the command stays alive while sound
             // exceeds the gate and ends once it drops back to ambient. (A fixed
             // lower floor never registered silence in a normal-noise room.)
-            if dbfs < wake_db_threshold { silent_ms += window_ms; } else { silent_ms = 0; }
+            if dbfs < wake_db_threshold {
+                silent_ms += window_ms;
+                if wake_fired { wake_pause_seen = true; }
+            } else {
+                silent_ms = 0;
+                if wake_fired && wake_pause_seen { spoke_after_wake = true; }
+            }
 
-            if silent_ms >= silence_timeout_ms || listen_ms >= MAX_UTTERANCE_MS {
+            // Effective end-of-utterance silence budget: while the wake has
+            // fired but the command hasn't started (no speech since the post-
+            // wake pause began), give POST_WAKE_SILENCE_MS of grace; otherwise
+            // the normal end-of-speech timeout.
+            let silence_budget = if wake_fired && !spoke_after_wake {
+                POST_WAKE_SILENCE_MS.max(silence_timeout_ms)
+            } else {
+                silence_timeout_ms
+            };
+
+            if silent_ms >= silence_budget || listen_ms >= MAX_UTTERANCE_MS {
                 // One conclusive calibration line per utterance. invokes==0 ⇒ the
                 // frontend produced no full 3-frame group (stub firmware / starved):
                 // reflash or chase the front-end. invokes≥1 with max_prob in 0..0.9
