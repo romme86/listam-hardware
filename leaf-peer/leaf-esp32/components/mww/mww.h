@@ -1,5 +1,5 @@
 #pragma once
-/* C-ABI shim over TFLite-Micro for the microWakeWord "yo" model.
+/* C-ABI shim over TFLite-Micro for multiple microWakeWord models.
  * Bound into Rust via esp-idf-sys `bindings_module = "mww"`. Keep this header
  * pure C so bindgen handles it (the .cc side is C++ / TFLite-Micro). */
 #include <stdint.h>
@@ -11,7 +11,7 @@ extern "C" {
 /* Initialize the int8 streaming interpreter (model blob) + the audio
  * microfrontend (matched to the pymicro-features training frontend:
  * 30ms window, 10ms step, 40 channels, 125-7500Hz, PCAN). 0 ok, <0 error. */
-int mww_init(const uint8_t *model_data, int model_len);
+int mww_init_slot(int slot, const uint8_t *model_data, int model_len);
 
 /* Reset streaming state (model resource variables + frontend) — call when
  * starting a fresh detection window (e.g. on dB-gate open) and after a fire. */
@@ -29,8 +29,8 @@ uint16_t mww_last_feat_peak(void);
 /* Diagnostics for one detection window (since the last mww_reset): the number of
  * model Invoke()s (0 ⇒ the frontend produced no full 3-frame group — stub/starved)
  * and the max wake probability seen. Make one spoken "yo" conclusive. */
-int mww_last_invokes(void);
-float mww_last_prob(void);
+int mww_last_invokes_slot(int slot);
+float mww_last_prob_slot(int slot);
 
 #ifdef __cplusplus
 }

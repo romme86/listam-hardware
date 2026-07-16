@@ -6,18 +6,39 @@ actually addressed — killing the ambient false-wakes we kept fighting with the
 `-40`/`-30`/`-37` threshold tuning.
 
 ## TL;DR decisions
-- **Do NOT ship bare "yo".** It's ~2 phonemes, open-vowel, below the ~6-phoneme
-  floor, and overlaps tons of speech (you/yeah/hello/no/oh/go/so/whoa) → heavy
-  false-accepts. **Recommend "hey listam"** (~7-8 phonemes, distinct trajectory,
-  lands in the <0.2 false-accepts/hour regime of shipped models). Fallback if a
-  short trigger is mandatory: **"dai dai dai dai"** (reduplication helps, but
-  vowel-heavy + timing-sensitive).
-- **You do NOT record "yo" hundreds of times.** Positives are 100% **synthetic
-  TTS** (Piper); negatives are **free pre-existing datasets**. Recording your own
-  voice is optional (~20-50 clips) as a late accuracy nudge.
+- Ship **`petito`** as the fast wake word and **`yo petito`** as the extended wake
+  word. Do not ship bare `yo`, whose short, common sound caused false accepts.
+- Initial positives are synthetic multi-speaker **Piper** clips; negatives are
+  pre-existing speech, music, domestic-noise, and room-impulse datasets. Bare
+  `petito` positives are also hard negatives for the longer `yo petito` model.
 - **Scope caveat:** this fixes **false-WAKES only**. After wake fires you still
   stream the same distant/noisy audio to whisper, so far-field *command*
   transcription SNR is unchanged. That needs a mic array / closer use / denoise.
+
+## Shipping cascade (2026-07-13)
+
+The supported wake-word targets are **"petito"** and **"yo petito"**, with two
+deliberately different command-input modes:
+
+- **"petito" — fast command:** opens a maximum **4-second** command window for
+  short actions such as adding or removing one item.
+- **"yo petito" — extended command:** opens a maximum **8-second** command window
+  for longer item names, explicit list targets, or voice notes.
+
+The shipping implementation runs two independent native microWakeWord models,
+`petito.tflite` and `yo_petito.tflite`, over one shared audio frontend. The dB
+gate only starts local inference: it does not light the LED, open a socket, or
+send audio to the host. Audio is retained in a bounded local pre-wake buffer and
+is streamed only after one of the native models crosses its five-sample rolling
+probability threshold.
+
+The detected phrase is carried into capture state and selects the corresponding
+4- or 8-second maximum. A `yo petito` match can upgrade a capture that initially
+matched `petito`; normal trailing silence still ends either command early. The
+host retains its Whisper confirmation and also accepts the observed Italian
+transcription alias `io petito`, but host transcription is no longer the first
+wake gate. Ordinary sounds that fail both native models remain entirely on the
+Leaf and cannot create shopping-list items.
 
 ## Data sourcing (the "record vs free" question)
 - **Positives:** `rhasspy/piper-sample-generator` (dscripka fork). Smoke test

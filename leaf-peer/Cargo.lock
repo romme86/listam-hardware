@@ -1282,6 +1282,7 @@ dependencies = [
  "hypercore_handshake",
  "hypercore_schema",
  "instant",
+ "log",
  "pretty-bytes",
  "pretty-hash",
  "rand 0.8.6",
@@ -1301,8 +1302,6 @@ dependencies = [
 [[package]]
 name = "hypercore_handshake"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "584a9b35a5a4c98ba23537d0b79962004c76f6088042343b5a716d4e00668e3a"
 dependencies = [
  "blake2",
  "crypto_secretstream",

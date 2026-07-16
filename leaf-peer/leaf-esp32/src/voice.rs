@@ -1,14 +1,10 @@
-//! Voice front-end thread: capture mic audio, gate on loudness, and stream an
-//! utterance to the paired host for transcription. The RGB LED is NOT driven by
-//! the local loudness gate — it stays off while capturing and lights only when
-//! the host reports what it recognized (yellow wake word → purple command →
-//! green saved), streamed back over the same socket after END.
+//! Voice front-end thread: capture mic audio and evaluate two native wake-word
+//! models before streaming an utterance to the paired host. The RGB LED stays
+//! off until an on-device keyword model fires, then the host advances it to purple
+//! (command), green (saved), or red (rejected/error) after transcription.
 //!
-//! The loudness (dB) gate is a capture trigger, not a wake-word match: a loud
-//! enough sound opens an utterance and streams it, but the board gives no light
-//! feedback until the host actually recognizes the wake word. The custom
-//! microWakeWord models ("yo" / "hey listam" / "dai dai dai dai") plug in where
-//! `is_wake()` is computed (Task 8); the dB gate stays in front regardless.
+//! The loudness (dB) gate only starts local inference; it is not authorization to
+//! stream. `petito` opens a 4-second command and `yo petito` opens an 8-second one.
 //!
 //! Wire frames to the host audio bridge: [u24le bodyLen][type][payload]
 //!   leaf -> host: 0x00 hello(utf8 id) · 0x01 start(wakeWordId:u8, epochMs:u32le)
@@ -36,26 +32,34 @@ use crate::led::Led;
 const SAMPLE_RATE: u32 = 16_000;
 const FULL_SCALE_24BIT: f32 = 8_388_608.0;
 const READ_BYTES: usize = 4096; // 1024 frames (32-bit slot) ~= 64 ms @ 16 kHz
-// Max capture window per utterance (wake word + command). Kitchen data showed
-// far-field noise keeps the dB gate open so most utterances ride to this cap —
-// at 12 s that meant ~8 s of dead recording after a ~3 s command before the
-// host even started transcribing. 4 s fits "yo" + a normal list command
-// ("yo aggiungi passata di pomodoro" ≈ 3.5 s); the host-side assembler cap
-// (voice.maxUtteranceSeconds) mirrors this bound server-side.
-const MAX_UTTERANCE_MS: u32 = 4_000;
+
+// Two native command-input modes. `petito` opens the fast mode; `yo petito`
+// opens (or upgrades to) the extended mode. Both are maximums; normal trailing
+// silence still ends a completed command earlier.
+const FAST_COMMAND_MAX_MS: u32 = 4_000;
+const EXTENDED_COMMAND_MAX_MS: u32 = 8_000;
 const PREROLL_WINDOWS: usize = 4; // ~256 ms kept before the wake fires
+const PREWAKE_WINDOWS: usize = 32; // ~2 s retained locally; never streamed without a native wake
 
-// On-device microWakeWord fire threshold. The model emits uint8/256 probability;
-// 0.90 ≈ raw uint8 ≥ 230. Tune alongside the /64 feature scale once calibrated.
-const WAKE_PROB_CUTOFF: f32 = 0.90;
+#[inline]
+fn command_max_ms(extended_wake_fired: bool) -> u32 {
+    if extended_wake_fired {
+        EXTENDED_COMMAND_MAX_MS
+    } else {
+        FAST_COMMAND_MAX_MS
+    }
+}
 
-// After the wake word fires, allow a natural pause before the command starts:
-// people say "yo", see the yellow light, THEN speak. Until post-wake speech is
-// heard, silence is budgeted at this floor instead of silence_timeout_ms (500ms
-// would close the window mid-pause and the command would arrive as a separate,
-// wake-less utterance — the "yellow flashes then nothing" failure). Once the
-// command starts, the normal (shorter) end-of-speech timeout applies again.
-// The 4s utterance cap still bounds the whole exchange.
+// Thresholds come from each model's quantized streaming evaluation and apply to
+// the five-inference rolling average in the C shim. They are intentionally not
+// shared: class weighting and hard-negative composition calibrate model outputs
+// differently even though both use the same uint8/256 output tensor.
+const PETITO_PROB_CUTOFF: f32 = 0.21;
+const YO_PETITO_PROB_CUTOFF: f32 = 0.30;
+
+// After an on-device keyword fires, allow a natural pause before the command.
+// Until speech resumes after that first pause, use this floor instead of the
+// normal 500ms end-of-speech timeout. The mode cap still bounds the exchange.
 const POST_WAKE_SILENCE_MS: u32 = 1_500;
 
 const F_HELLO: u8 = 0x00;
@@ -119,8 +123,7 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<(u8,
 }
 
 // Drive the LED from host feedback frames after END, until the host says it is
-// done (or the socket closes / the feedback window elapses). The LED is off on
-// entry and is left off by the caller on return.
+// done (or the socket closes / the feedback window elapses).
 fn drive_feedback(stream: &mut TcpStream, led: &mut Led<'_>) {
     stream.set_read_timeout(Some(FEEDBACK_POLL)).ok();
     let deadline = Instant::now() + FEEDBACK_TIMEOUT;
@@ -158,9 +161,10 @@ fn connect_any(list: &str) -> Option<TcpStream> {
     None
 }
 
-// On-device microWakeWord "yo" model (int8 streaming MixedNet, 61KB). Run as a
-// first-stage filter behind the dB gate via the mww C-shim (components/mww).
-static YO_TFLITE: &[u8] = include_bytes!("../wakeword/yo.tflite");
+// Separate native models let firmware select the correct command duration.
+// Both share one microfrontend but retain independent streaming model state.
+static PETITO_TFLITE: &[u8] = include_bytes!("../wakeword/petito.tflite");
+static YO_PETITO_TFLITE: &[u8] = include_bytes!("../wakeword/yo_petito.tflite");
 
 // Reinterpret a PCM16 window as little-endian wire bytes. The leaf is
 // little-endian, so the in-memory layout already IS PCM16LE — no copy/swap.
@@ -171,29 +175,41 @@ fn pcm16_as_bytes(p: &[i16]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(p.as_ptr() as *const u8, std::mem::size_of_val(p)) }
 }
 
-// Feed one captured PCM window to the on-device wake model. The C shim runs the
+// Feed one captured PCM window to the on-device wake models. The C shim runs the
 // vendored microfrontend (pymicro-features-matched) + the streaming int8 model,
 // carrying state across calls. We log the per-window probability and the running
-// raw feature peak so a single spoken "yo" calibrates the /64 feature scale, and
+// raw feature peak for calibration, and
 // on the first window to cross the cutoff we light the LED yellow locally — an
 // instant on-device wake confirmation, independent of the host re-confirm that
 // drive_feedback() layers on later. Returns the window's max probability (or <0
 // when the front-end isn't ready / no full frame landed this window).
-fn mww_step(pcm16: &[i16], wake_fired: &mut bool, led: &mut Led<'_>) -> f32 {
-    let prob = unsafe {
+fn mww_step(
+    pcm16: &[i16],
+    wake_fired: &mut bool,
+    extended_wake_fired: &mut bool,
+    led: &mut Led<'_>,
+) -> f32 {
+    let processed = unsafe {
         esp_idf_svc::sys::mww::mww_process(pcm16.as_ptr(), pcm16.len() as core::ffi::c_int)
     };
-    if prob < 0.0 {
-        return prob; // front-end stubbed/not ready, or <3 frames this window
+    if processed < 0.0 {
+        return processed; // front-end stubbed/not ready, or <3 frames this window
     }
+    let petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(0) };
+    let yo_petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(1) };
     let feat_peak = unsafe { esp_idf_svc::sys::mww::mww_last_feat_peak() };
-    info!("[voice] mww prob={prob:.3} feat_peak={feat_peak}");
-    if prob >= WAKE_PROB_CUTOFF && !*wake_fired {
+    info!("[voice] mww petito={petito_prob:.3} yo_petito={yo_petito_prob:.3} feat_peak={feat_peak}");
+    if yo_petito_prob >= YO_PETITO_PROB_CUTOFF && !*extended_wake_fired {
+        *extended_wake_fired = true;
         *wake_fired = true;
         let _ = led.yellow();
-        info!("[voice] on-device wake FIRED (prob={prob:.3} >= {WAKE_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
+        info!("[voice] on-device yo-petito wake FIRED (prob={yo_petito_prob:.3} >= {YO_PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
+    } else if petito_prob >= PETITO_PROB_CUTOFF && !*wake_fired {
+        *wake_fired = true;
+        let _ = led.yellow();
+        info!("[voice] on-device petito wake FIRED (prob={petito_prob:.3} >= {PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
     }
-    prob
+    petito_prob.max(yo_petito_prob)
 }
 
 pub fn run(
@@ -228,24 +244,30 @@ pub fn run(
         warn!("[voice] I2S rx_enable failed: {err:#}");
         return;
     }
-    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, mic gain {}x, host {audio_addr}", 1u32 << mic_gain_shift);
+    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, fast={} ms, extended={} ms, mic gain {}x, host {audio_addr}", FAST_COMMAND_MAX_MS, EXTENDED_COMMAND_MAX_MS, 1u32 << mic_gain_shift);
 
     // Load the on-device wake model once. rc=0 ok; <0 = model/version/arena/op
     // error (validates AllocateTensors + the 64KB arena + streaming resource vars
     // on real hardware — the #7242 risk). is_wake() inference wires in next.
-    let mww_rc = unsafe {
-        esp_idf_svc::sys::mww::mww_init(YO_TFLITE.as_ptr(), YO_TFLITE.len() as core::ffi::c_int)
+    let petito_rc = unsafe {
+        esp_idf_svc::sys::mww::mww_init_slot(0, PETITO_TFLITE.as_ptr(), PETITO_TFLITE.len() as core::ffi::c_int)
     };
-    info!("[voice] mww_init rc={mww_rc} ({} byte model)", YO_TFLITE.len());
+    let yo_petito_rc = unsafe {
+        esp_idf_svc::sys::mww::mww_init_slot(1, YO_PETITO_TFLITE.as_ptr(), YO_PETITO_TFLITE.len() as core::ffi::c_int)
+    };
+    info!("[voice] mww_init petito={petito_rc} ({} bytes), yo_petito={yo_petito_rc} ({} bytes)", PETITO_TFLITE.len(), YO_PETITO_TFLITE.len());
 
     let mut buf = vec![0u8; READ_BYTES]; // heap, not stack — this thread runs on a small internal-RAM stack
     let mut preroll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut listening = false;
-    let mut wake_fired = false; // on-device mww crossed the cutoff this utterance
+    let mut wake_fired = false; // either native keyword crossed its cutoff
+    let mut extended_wake_fired = false; // specifically `yo petito`
     let mut wake_pause_seen = false; // a quiet window occurred after the wake fired
-    let mut spoke_after_wake = false; // speech resumed after that post-wake pause
+    let mut spoke_after_wake = false; // command speech resumed after that pause
     let mut win_n = 0u32; // audio windows fed to mww this utterance (calibration summary)
     let mut stream: Option<TcpStream> = None;
+    let mut wake_stream_started = false;
+    let mut prewake_audio: VecDeque<Vec<i16>> = VecDeque::new();
     let mut silent_ms = 0u32;
     let mut listen_ms = 0u32;
     // PCM16 extraction shift: 16 = plain top-16-bits, minus the digital gain.
@@ -277,58 +299,85 @@ pub fn run(
         let dbfs = if peak > 0 { 20.0 * (peak as f32 / FULL_SCALE_24BIT).log10() } else { -120.0 };
 
         if !listening {
-            // IDLE — LED off, waiting for the wake word. Keep a short pre-roll.
+            // IDLE — LED off, waiting for speech. Keep a short pre-roll.
             preroll.push_back(pcm16);
             while preroll.len() > PREROLL_WINDOWS { preroll.pop_front(); }
             if dbfs >= wake_db_threshold {
-                // Sound opened the capture window. The dB gate is only a cheap
-                // pre-filter; the on-device microWakeWord model decides whether
-                // this is really "yo" and lights the LED yellow locally when it
-                // fires. The host re-confirms and drives the later colors.
-                info!("[voice] sound gate open ({dbfs:.1} dBFS) — capturing");
+                // Sound only opens a local inference window. No socket is opened
+                // and no audio leaves the Leaf until a native model fires.
+                info!("[voice] sound gate open ({dbfs:.1} dBFS) — evaluating locally");
                 listening = true;
                 wake_fired = false;
+                extended_wake_fired = false;
                 wake_pause_seen = false;
                 spoke_after_wake = false;
                 win_n = 0;
                 listen_ms = 0;
                 silent_ms = 0;
+                wake_stream_started = false;
+                prewake_audio.clear();
                 // Start a fresh wake-detection window and warm the streaming model
                 // with the pre-roll lead-in before the captured audio arrives.
                 unsafe { esp_idf_svc::sys::mww::mww_reset() };
-                for p in preroll.iter() { mww_step(p, &mut wake_fired, &mut led); win_n += 1; }
-                // Connect if a host is reachable; either way we capture locally for
-                // the command window, so the countdown works with no host too.
+                for p in preroll.iter() {
+                    mww_step(p, &mut wake_fired, &mut extended_wake_fired, &mut led);
+                    win_n += 1;
+                    prewake_audio.push_back(p.clone());
+                }
+                preroll.clear();
+            }
+        } else {
+            // CAPTURING — run both on-device wake models over each window. Before
+            // a native match, audio only enters the bounded local pre-wake buffer.
+            // After a match, stream it and count down to silence or the mode cap.
+            if !wake_fired {
+                prewake_audio.push_back(pcm16.clone());
+                while prewake_audio.len() > PREWAKE_WINDOWS { prewake_audio.pop_front(); }
+            }
+            let was_awake = wake_fired;
+            let was_extended = extended_wake_fired;
+            mww_step(&pcm16, &mut wake_fired, &mut extended_wake_fired, &mut led);
+            if extended_wake_fired && !was_extended {
+                // Wake just fired: open the post-wake grace so the user's pause
+                // after the longer wake phrase doesn't close the window, and extend
+                // this capture from the 4s fast mode to the 8s command mode.
+                silent_ms = 0;
+                listen_ms = 0;
+                info!("[voice] capture mode extended to {EXTENDED_COMMAND_MAX_MS} ms (yo fired)");
+            }
+            win_n += 1;
+
+            // The model can fire while warming on the idle pre-roll, so this is
+            // tracked independently from `was_awake` (which only describes the
+            // current captured window).
+            if wake_fired && !wake_stream_started {
+                wake_stream_started = true;
+                // Command limits start after the wake phrase, not when the cheap
+                // sound gate first opened during that phrase.
+                listen_ms = 0;
+                silent_ms = 0;
                 stream = connect_any(audio_addr);
                 match stream {
                     Some(ref mut s) => {
                         s.set_nodelay(true).ok();
                         let _ = send_frame(s, F_HELLO, b"leaf");
-                        let _ = send_frame(s, F_START, &[1, 0, 0, 0, 0]); // wakeWordId=1 (dB gate)
-                        for p in preroll.drain(..) { let _ = send_frame(s, F_CHUNK, pcm16_as_bytes(&p)); }
-                        info!("[voice] streaming to host");
+                        let wake_id = if extended_wake_fired { 2 } else { 1 };
+                        let _ = send_frame(s, F_START, &[wake_id, 0, 0, 0, 0]);
+                        for p in prewake_audio.drain(..) {
+                            let _ = send_frame(s, F_CHUNK, pcm16_as_bytes(&p));
+                        }
+                        info!("[voice] native wake accepted; streaming to host (wakeWordId={wake_id})");
                     }
                     None => {
-                        warn!("[voice] no audio host reachable in {audio_addr}");
-                        preroll.clear();
+                        warn!("[voice] native wake fired but no audio host reachable in {audio_addr}");
+                        prewake_audio.clear();
                     }
                 }
             }
-        } else {
-            // CAPTURING — run the on-device wake model over each window (lights the
-            // LED yellow locally the instant "yo" is matched) and stream the audio,
-            // counting down to the end of the command: silence_timeout_ms of quiet,
-            // or the max window.
-            let was_fired = wake_fired;
-            mww_step(&pcm16, &mut wake_fired, &mut led);
-            if wake_fired && !was_fired {
-                // Wake just fired: open the post-wake grace so the user's pause
-                // between "yo" and the command doesn't close the window.
-                silent_ms = 0;
-            }
-            win_n += 1;
             if let Some(ref mut s) = stream {
-                if send_frame(s, F_CHUNK, pcm16_as_bytes(&pcm16)).is_err() {
+                // The firing window is already present in prewake_audio and was
+                // drained above. Subsequent command windows are sent directly.
+                if was_awake && send_frame(s, F_CHUNK, pcm16_as_bytes(&pcm16)).is_err() {
                     warn!("[voice] stream dropped");
                     stream = None;
                 }
@@ -346,32 +395,34 @@ pub fn run(
                 if wake_fired && wake_pause_seen { spoke_after_wake = true; }
             }
 
-            // Effective end-of-utterance silence budget: while the wake has
-            // fired but the command hasn't started (no speech since the post-
-            // wake pause began), give POST_WAKE_SILENCE_MS of grace; otherwise
-            // the normal end-of-speech timeout.
+            // Effective end-of-utterance silence budget: after a native wake but
+            // before command speech resumes, leave enough time to notice the
+            // yellow light and continue. Afterwards use normal end-of-speech.
             let silence_budget = if wake_fired && !spoke_after_wake {
                 POST_WAKE_SILENCE_MS.max(silence_timeout_ms)
             } else {
                 silence_timeout_ms
             };
 
-            if silent_ms >= silence_budget || listen_ms >= MAX_UTTERANCE_MS {
+            let max_command_ms = command_max_ms(extended_wake_fired);
+            if silent_ms >= silence_budget || listen_ms >= max_command_ms {
                 // One conclusive calibration line per utterance. invokes==0 ⇒ the
                 // frontend produced no full 3-frame group (stub firmware / starved):
                 // reflash or chase the front-end. invokes≥1 with max_prob in 0..0.9
                 // ⇒ the model ran but didn't fire: a feature-scale / cutoff tune,
                 // NOT a front-end problem. max_prob≥cutoff ⇒ yellow fired.
-                let inv = unsafe { esp_idf_svc::sys::mww::mww_last_invokes() };
-                let max_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob() };
+                let petito_inv = unsafe { esp_idf_svc::sys::mww::mww_last_invokes_slot(0) };
+                let yo_petito_inv = unsafe { esp_idf_svc::sys::mww::mww_last_invokes_slot(1) };
+                let petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(0) };
+                let yo_petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(1) };
+                let max_prob = petito_prob.max(yo_petito_prob);
                 let max_feat = unsafe { esp_idf_svc::sys::mww::mww_last_feat_peak() };
-                info!("[voice] WAKE SUMMARY windows={win_n} invokes={inv} max_prob={max_prob:.3} max_feat_peak={max_feat} fired={wake_fired} (cutoff={WAKE_PROB_CUTOFF:.2})");
-                let reason = if listen_ms >= MAX_UTTERANCE_MS { 1u8 } else { 0u8 };
+                info!("[voice] WAKE SUMMARY windows={win_n} petito(inv={petito_inv},p={petito_prob:.3},cutoff={PETITO_PROB_CUTOFF:.2}) yo_petito(inv={yo_petito_inv},p={yo_petito_prob:.3},cutoff={YO_PETITO_PROB_CUTOFF:.2}) max_feat_peak={max_feat} fired={wake_fired} extended={extended_wake_fired}");
+                let reason = if listen_ms >= max_command_ms { 1u8 } else { 0u8 };
                 if let Some(ref mut s) = stream {
                     // END carries the on-device wake label so the host can store
                     // each utterance into the training dataset auto-labeled as a
-                    // positive ("yo" fired) or a hard-negative (gate opened, model
-                    // didn't fire): [reason, fired, prob_milli:u16le, feat_peak:u16le].
+                    // native match: [reason, fired, prob_milli:u16le, feat_peak:u16le].
                     let prob_milli = (max_prob.max(0.0) * 1000.0) as u16;
                     let end_payload = [
                         reason,
@@ -381,7 +432,8 @@ pub fn run(
                     ];
                     let _ = send_frame(s, F_END, &end_payload);
                     let _ = s.flush();
-                    info!("[voice] utterance sent ({listen_ms} ms, reason {reason}); awaiting host feedback");
+                    let mode = if extended_wake_fired { "yo-petito/extended" } else { "petito/fast" };
+                    info!("[voice] utterance sent ({listen_ms} ms, mode {mode}, max {max_command_ms} ms, reason {reason}); awaiting host feedback");
                     // Mirror the host's recognition onto the LED (yellow wake →
                     // purple command → green saved). Then a brief hold so the
                     // final color registers before we reset to idle.
@@ -389,10 +441,11 @@ pub fn run(
                     std::thread::sleep(Duration::from_millis(500));
                     let _ = s.shutdown(Shutdown::Both);
                 } else {
-                    info!("[voice] capture window ended ({listen_ms} ms, no host)");
+                    info!("[voice] capture window ended ({listen_ms} ms, max {max_command_ms} ms, no host)");
                 }
                 let _ = led.off();
                 stream = None;
+                prewake_audio.clear();
                 listening = false;
             }
         }

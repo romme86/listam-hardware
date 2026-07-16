@@ -1,0 +1,19 @@
+{
+  "wake_word": "yo petito",
+  "transcription_aliases": ["io petito"],
+  "model": "yo_petito.tflite",
+  "trained": "2026-07-13 (microWakeWord, 30k synthetic multi-speaker positives with speech, domestic-noise, music, and RIR augmentation; bare petito included as a hard negative; 10k steps)",
+  "command_window_ms": 8000,
+  "notes": "Extended command model. A match upgrades an already-open fast capture to the extended command window.",
+  "micro": {
+    "probability_cutoff": 0.30,
+    "quantized_streaming_eval": { "false_reject": 0.009, "false_accepts_per_hour": 0.0 },
+    "sliding_window_size": 5,
+    "feature_step_size_ms": 10,
+    "features_per_frame": 40,
+    "frames_per_inference": 3,
+    "tensor_arena_size": 65536,
+    "input": { "shape": [1, 3, 40], "dtype": "int8", "scale": 0.10196078568696976, "zero_point": -128 },
+    "output": { "shape": [1, 1], "dtype": "uint8", "scale": 0.00390625, "zero_point": 0 }
+  }
+}
