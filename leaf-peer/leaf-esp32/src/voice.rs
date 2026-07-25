@@ -1,10 +1,11 @@
 //! Voice front-end thread: capture mic audio and evaluate two native wake-word
-//! models before streaming an utterance to the paired host. The RGB LED stays
-//! off until an on-device keyword model fires, then the host advances it to purple
-//! (command), green (saved), or red (rejected/error) after transcription.
+//! models. A standalone `petito` is resolved locally and plays a random GPIO7
+//! tune. `yo petito` streams the following utterance to the paired host for the
+//! usual list commands. The RGB LED stays off until a model fires.
 //!
 //! The loudness (dB) gate only starts local inference; it is not authorization to
-//! stream. `petito` opens a 4-second command and `yo petito` opens an 8-second one.
+//! stream. The short wake is held briefly so the longer phrase can win before
+//! local music starts.
 //!
 //! Wire frames to the host audio bridge: [u24le bodyLen][type][payload]
 //!   leaf -> host: 0x00 hello(utf8 id) · 0x01 start(wakeWordId:u8, epochMs:u32le)
@@ -19,14 +20,16 @@ use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use esp_idf_svc::hal::delay::BLOCK;
-use esp_idf_svc::hal::gpio::{AnyIOPin, AnyOutputPin, Gpio4, Gpio5, Gpio6};
+use esp_idf_svc::hal::gpio::{AnyIOPin, AnyOutputPin, Gpio4, Gpio5, Gpio6, Gpio7};
 use esp_idf_svc::hal::i2s::config::{
     Config, DataBitWidth, SlotMode, StdClkConfig, StdConfig, StdGpioConfig, StdSlotConfig,
 };
 use esp_idf_svc::hal::i2s::{I2sDriver, I2S0};
+use esp_idf_svc::hal::ledc::{CHANNEL0 as LEDC_CHANNEL0, TIMER0 as LEDC_TIMER0};
 use esp_idf_svc::hal::rmt::CHANNEL0;
 use log::{info, warn};
 
+use crate::buzzer::Buzzer;
 use crate::led::Led;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -38,6 +41,10 @@ const READ_BYTES: usize = 4096; // 1024 frames (32-bit slot) ~= 64 ms @ 16 kHz
 // silence still ends a completed command earlier.
 const FAST_COMMAND_MAX_MS: u32 = 4_000;
 const EXTENDED_COMMAND_MAX_MS: u32 = 8_000;
+// A `yo petito` utterance can make the shorter `petito` model fire at the end
+// of the phrase. Defer the local action long enough for the compound model's
+// next streaming windows to cross its cutoff.
+const PETITO_DISAMBIGUATION_MS: u32 = 900;
 const PREROLL_WINDOWS: usize = 4; // ~256 ms kept before the wake fires
 const PREWAKE_WINDOWS: usize = 32; // ~2 s retained locally; never streamed without a native wake
 
@@ -54,8 +61,9 @@ fn command_max_ms(extended_wake_fired: bool) -> u32 {
 // the five-inference rolling average in the C shim. They are intentionally not
 // shared: class weighting and hard-negative composition calibrate model outputs
 // differently even though both use the same uint8/256 output tensor.
-const PETITO_PROB_CUTOFF: f32 = 0.21;
+const PETITO_PROB_CUTOFF: f32 = 0.62;
 const YO_PETITO_PROB_CUTOFF: f32 = 0.30;
+const WAKE_CONSECUTIVE_HITS: u8 = 2;
 
 // After an on-device keyword fires, allow a natural pause before the command.
 // Until speech resumes after that first pause, use this floor instead of the
@@ -185,8 +193,11 @@ fn pcm16_as_bytes(p: &[i16]) -> &[u8] {
 // when the front-end isn't ready / no full frame landed this window).
 fn mww_step(
     pcm16: &[i16],
+    petito_music_fired: &mut bool,
     wake_fired: &mut bool,
     extended_wake_fired: &mut bool,
+    petito_hits: &mut u8,
+    yo_petito_hits: &mut u8,
     led: &mut Led<'_>,
 ) -> f32 {
     let processed = unsafe {
@@ -195,19 +206,30 @@ fn mww_step(
     if processed < 0.0 {
         return processed; // front-end stubbed/not ready, or <3 frames this window
     }
-    let petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(0) };
-    let yo_petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(1) };
+    let petito_prob = unsafe { esp_idf_svc::sys::mww::mww_current_prob_slot(0) };
+    let yo_petito_prob = unsafe { esp_idf_svc::sys::mww::mww_current_prob_slot(1) };
     let feat_peak = unsafe { esp_idf_svc::sys::mww::mww_last_feat_peak() };
     info!("[voice] mww petito={petito_prob:.3} yo_petito={yo_petito_prob:.3} feat_peak={feat_peak}");
-    if yo_petito_prob >= YO_PETITO_PROB_CUTOFF && !*extended_wake_fired {
+    *petito_hits = if petito_prob >= PETITO_PROB_CUTOFF {
+        (*petito_hits).saturating_add(1)
+    } else {
+        0
+    };
+    *yo_petito_hits = if yo_petito_prob >= YO_PETITO_PROB_CUTOFF {
+        (*yo_petito_hits).saturating_add(1)
+    } else {
+        0
+    };
+    if *yo_petito_hits >= WAKE_CONSECUTIVE_HITS && !*extended_wake_fired {
         *extended_wake_fired = true;
         *wake_fired = true;
         let _ = led.yellow();
-        info!("[voice] on-device yo-petito wake FIRED (prob={yo_petito_prob:.3} >= {YO_PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
-    } else if petito_prob >= PETITO_PROB_CUTOFF && !*wake_fired {
-        *wake_fired = true;
+        info!("[voice] on-device yo-petito wake FIRED ({WAKE_CONSECUTIVE_HITS} consecutive hits, prob={yo_petito_prob:.3} >= {YO_PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
+    }
+    if *petito_hits >= WAKE_CONSECUTIVE_HITS && !*petito_music_fired {
+        *petito_music_fired = true;
         let _ = led.yellow();
-        info!("[voice] on-device petito wake FIRED (prob={petito_prob:.3} >= {PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
+        info!("[voice] on-device petito wake FIRED — pending local music ({WAKE_CONSECUTIVE_HITS} consecutive hits, prob={petito_prob:.3} >= {PETITO_PROB_CUTOFF:.2}, feat_peak={feat_peak})");
     }
     petito_prob.max(yo_petito_prob)
 }
@@ -219,6 +241,9 @@ pub fn run(
     ws: Gpio5,
     rmt: CHANNEL0,
     led_pin: AnyOutputPin,
+    buzzer_timer: LEDC_TIMER0,
+    buzzer_channel: LEDC_CHANNEL0,
+    buzzer_pin: Gpio7,
     audio_addr: &'static str,
     wake_db_threshold: f32,
     silence_timeout_ms: u32,
@@ -229,6 +254,13 @@ pub fn run(
         Err(err) => { warn!("[voice] LED init failed ({err:#}); continuing without it"); return; }
     };
     let _ = led.off();
+    let mut buzzer = match Buzzer::new(buzzer_timer, buzzer_channel, buzzer_pin) {
+        Ok(b) => Some(b),
+        Err(err) => {
+            warn!("[voice] buzzer init failed ({err:#}); petito music disabled");
+            None
+        }
+    };
 
     let cfg = StdConfig::new(
         Config::default(),
@@ -244,7 +276,7 @@ pub fn run(
         warn!("[voice] I2S rx_enable failed: {err:#}");
         return;
     }
-    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, fast={} ms, extended={} ms, mic gain {}x, host {audio_addr}", FAST_COMMAND_MAX_MS, EXTENDED_COMMAND_MAX_MS, 1u32 << mic_gain_shift);
+    info!("[voice] up: gate>={wake_db_threshold:.0} dBFS, silence {silence_timeout_ms} ms, petito=random music, yo-petito command={} ms, mic gain {}x, host {audio_addr}", EXTENDED_COMMAND_MAX_MS, 1u32 << mic_gain_shift);
 
     // Load the on-device wake model once. rc=0 ok; <0 = model/version/arena/op
     // error (validates AllocateTensors + the 64KB arena + streaming resource vars
@@ -258,10 +290,17 @@ pub fn run(
     info!("[voice] mww_init petito={petito_rc} ({} bytes), yo_petito={yo_petito_rc} ({} bytes)", PETITO_TFLITE.len(), YO_PETITO_TFLITE.len());
 
     let mut buf = vec![0u8; READ_BYTES]; // heap, not stack — this thread runs on a small internal-RAM stack
+    // Keep parallel pre-rolls: the wake models receive clean, unclipped PCM,
+    // while the host stream retains the configured digital gain needed by STT.
+    let mut wake_preroll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut preroll: VecDeque<Vec<i16>> = VecDeque::new();
     let mut listening = false;
-    let mut wake_fired = false; // either native keyword crossed its cutoff
+    let mut petito_music_fired = false; // standalone `petito` candidate
+    let mut petito_pending_ms = 0u32; // wait for possible `yo petito` upgrade
+    let mut wake_fired = false; // specifically the command wake `yo petito`
     let mut extended_wake_fired = false; // specifically `yo petito`
+    let mut petito_hits = 0u8;
+    let mut yo_petito_hits = 0u8;
     let mut wake_pause_seen = false; // a quiet window occurred after the wake fired
     let mut spoke_after_wake = false; // command speech resumed after that pause
     let mut win_n = 0u32; // audio windows fed to mww this utterance (calibration summary)
@@ -280,19 +319,19 @@ pub fn run(
         if frames == 0 { continue; }
         let window_ms = (frames as u32 * 1000) / SAMPLE_RATE;
 
-        // One pass: peak (24-bit, for dBFS — always from the UNgained sample so
-        // the gate threshold keeps its room calibration) + PCM16 with digital
-        // gain (a smaller right-shift keeps more of the 24-bit sample's low
-        // bits, saturating on loud close speech). Keep samples as i16 — wire
-        // bytes come from pcm16_as_bytes() and the wake model wants an aligned
-        // *const i16.
+        // One pass creates two PCM paths from the same 24-bit microphone word:
+        // clean PCM16 for microWakeWord (matching the real-device training
+        // corpus), and optionally amplified PCM16 for host STT. The old shared
+        // +18 dB path clipped 7-71% of calibration samples before wake inference.
         let mut peak: i32 = 0;
+        let mut wake_pcm16: Vec<i16> = Vec::with_capacity(frames);
         let mut pcm16: Vec<i16> = Vec::with_capacity(frames);
         for f in 0..frames {
             let o = f * 4;
             let raw = i32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
             let mag = (raw >> 8).abs();
             if mag > peak { peak = mag; }
+            wake_pcm16.push((raw >> 16).clamp(i16::MIN as i32, i16::MAX as i32) as i16);
             let amplified = (raw >> pcm_shift).clamp(i16::MIN as i32, i16::MAX as i32);
             pcm16.push(amplified as i16);
         }
@@ -300,15 +339,21 @@ pub fn run(
 
         if !listening {
             // IDLE — LED off, waiting for speech. Keep a short pre-roll.
+            wake_preroll.push_back(wake_pcm16);
             preroll.push_back(pcm16);
+            while wake_preroll.len() > PREROLL_WINDOWS { wake_preroll.pop_front(); }
             while preroll.len() > PREROLL_WINDOWS { preroll.pop_front(); }
             if dbfs >= wake_db_threshold {
                 // Sound only opens a local inference window. No socket is opened
                 // and no audio leaves the Leaf until a native model fires.
                 info!("[voice] sound gate open ({dbfs:.1} dBFS) — evaluating locally");
                 listening = true;
+                petito_music_fired = false;
+                petito_pending_ms = 0;
                 wake_fired = false;
                 extended_wake_fired = false;
+                petito_hits = 0;
+                yo_petito_hits = 0;
                 wake_pause_seen = false;
                 spoke_after_wake = false;
                 win_n = 0;
@@ -319,11 +364,14 @@ pub fn run(
                 // Start a fresh wake-detection window and warm the streaming model
                 // with the pre-roll lead-in before the captured audio arrives.
                 unsafe { esp_idf_svc::sys::mww::mww_reset() };
-                for p in preroll.iter() {
-                    mww_step(p, &mut wake_fired, &mut extended_wake_fired, &mut led);
+                for p in wake_preroll.iter() {
+                    mww_step(p, &mut petito_music_fired, &mut wake_fired, &mut extended_wake_fired, &mut petito_hits, &mut yo_petito_hits, &mut led);
                     win_n += 1;
+                }
+                for p in preroll.iter() {
                     prewake_audio.push_back(p.clone());
                 }
+                wake_preroll.clear();
                 preroll.clear();
             }
         } else {
@@ -336,7 +384,12 @@ pub fn run(
             }
             let was_awake = wake_fired;
             let was_extended = extended_wake_fired;
-            mww_step(&pcm16, &mut wake_fired, &mut extended_wake_fired, &mut led);
+            mww_step(&wake_pcm16, &mut petito_music_fired, &mut wake_fired, &mut extended_wake_fired, &mut petito_hits, &mut yo_petito_hits, &mut led);
+            if petito_music_fired && !wake_fired {
+                petito_pending_ms = petito_pending_ms.saturating_add(window_ms);
+            } else if wake_fired {
+                petito_pending_ms = 0;
+            }
             if extended_wake_fired && !was_extended {
                 // Wake just fired: open the post-wake grace so the user's pause
                 // after the longer wake phrase doesn't close the window, and extend
@@ -395,10 +448,63 @@ pub fn run(
                 if wake_fired && wake_pause_seen { spoke_after_wake = true; }
             }
 
+            // A standalone `petito` is local-only. Pause I2S while the piezo is
+            // active so its own notes cannot enter the wake pipeline, then reset
+            // the streaming models and return to idle. `yo petito` always wins
+            // if it fires during the disambiguation window above.
+            if petito_music_fired && !wake_fired && petito_pending_ms >= PETITO_DISAMBIGUATION_MS {
+                info!("[voice] standalone petito confirmed — choosing a random tune");
+                let mic_paused = match mic.rx_disable() {
+                    Ok(()) => true,
+                    Err(err) => {
+                        warn!("[voice] could not pause mic for music: {err:#}");
+                        false
+                    }
+                };
+                let _ = led.green();
+                match buzzer.as_mut() {
+                    Some(player) => match player.play_random() {
+                        Ok(tune) => info!("[voice] random tune complete: {}", tune.title),
+                        Err(err) => {
+                            warn!("[voice] random tune failed: {err:#}");
+                            let _ = led.red();
+                        }
+                    },
+                    None => {
+                        warn!("[voice] petito music requested but buzzer is unavailable");
+                        let _ = led.red();
+                        std::thread::sleep(Duration::from_millis(600));
+                    }
+                }
+                if mic_paused {
+                    std::thread::sleep(Duration::from_millis(150));
+                    if let Err(err) = mic.rx_enable() {
+                        warn!("[voice] could not resume mic after music: {err:#}");
+                        return;
+                    }
+                }
+                unsafe { esp_idf_svc::sys::mww::mww_reset() };
+                let _ = led.off();
+                stream = None;
+                wake_preroll.clear();
+                preroll.clear();
+                prewake_audio.clear();
+                listening = false;
+                petito_music_fired = false;
+                petito_pending_ms = 0;
+                wake_fired = false;
+                extended_wake_fired = false;
+                petito_hits = 0;
+                yo_petito_hits = 0;
+                continue;
+            }
+
             // Effective end-of-utterance silence budget: after a native wake but
             // before command speech resumes, leave enough time to notice the
             // yellow light and continue. Afterwards use normal end-of-speech.
-            let silence_budget = if wake_fired && !spoke_after_wake {
+            let silence_budget = if petito_music_fired && !wake_fired {
+                (PETITO_DISAMBIGUATION_MS + 250).max(silence_timeout_ms)
+            } else if wake_fired && !spoke_after_wake {
                 POST_WAKE_SILENCE_MS.max(silence_timeout_ms)
             } else {
                 silence_timeout_ms
@@ -417,7 +523,7 @@ pub fn run(
                 let yo_petito_prob = unsafe { esp_idf_svc::sys::mww::mww_last_prob_slot(1) };
                 let max_prob = petito_prob.max(yo_petito_prob);
                 let max_feat = unsafe { esp_idf_svc::sys::mww::mww_last_feat_peak() };
-                info!("[voice] WAKE SUMMARY windows={win_n} petito(inv={petito_inv},p={petito_prob:.3},cutoff={PETITO_PROB_CUTOFF:.2}) yo_petito(inv={yo_petito_inv},p={yo_petito_prob:.3},cutoff={YO_PETITO_PROB_CUTOFF:.2}) max_feat_peak={max_feat} fired={wake_fired} extended={extended_wake_fired}");
+                info!("[voice] WAKE SUMMARY windows={win_n} petito(inv={petito_inv},p={petito_prob:.3},cutoff={PETITO_PROB_CUTOFF:.2},music={petito_music_fired}) yo_petito(inv={yo_petito_inv},p={yo_petito_prob:.3},cutoff={YO_PETITO_PROB_CUTOFF:.2}) max_feat_peak={max_feat} fired={wake_fired} extended={extended_wake_fired}");
                 let reason = if listen_ms >= max_command_ms { 1u8 } else { 0u8 };
                 if let Some(ref mut s) = stream {
                     // END carries the on-device wake label so the host can store

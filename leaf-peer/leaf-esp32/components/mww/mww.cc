@@ -56,6 +56,7 @@ struct ModelState {
   MwwOpResolver resolver;
   int invokes = 0;
   float max_prob = -1.0f;
+  float current_prob = -1.0f;
   float prob_window[kProbabilityWindow] = {};
   int prob_count = 0;
   int prob_index = 0;
@@ -105,6 +106,7 @@ float push_frame(const uint16_t *values) {
     float prob = 0.0f;
     for (float value : state.prob_window) prob += value;
     prob /= (float)kProbabilityWindow;
+    if (prob > state.current_prob) state.current_prob = prob;
     if (prob > state.max_prob) state.max_prob = prob;
     if (prob > max_prob) max_prob = prob;
   }
@@ -167,6 +169,7 @@ extern "C" int mww_init_slot(int slot, const uint8_t *model_data, int model_len)
 #endif
   state.invokes = 0;
   state.max_prob = -1.0f;
+  state.current_prob = -1.0f;
   state.prob_count = 0;
   state.prob_index = 0;
   std::memset(state.prob_window, 0, sizeof(state.prob_window));
@@ -184,6 +187,7 @@ extern "C" void mww_reset(void) {
     ModelState &state = g_models[slot];
     state.invokes = 0;
     state.max_prob = -1.0f;
+    state.current_prob = -1.0f;
     state.prob_count = 0;
     state.prob_index = 0;
     std::memset(state.prob_window, 0, sizeof(state.prob_window));
@@ -194,6 +198,9 @@ extern "C" void mww_reset(void) {
 extern "C" float mww_process(const int16_t *pcm, int num_samples) {
 #if MWW_HAVE_FRONTEND
   if (!g_fe_ready) return -1.0f;
+  for (int slot = 0; slot < kModelSlots; ++slot) {
+    g_models[slot].current_prob = -1.0f;
+  }
   float max_prob = -1.0f;
   size_t offset = 0;
   while (offset < (size_t)num_samples) {
@@ -222,4 +229,7 @@ extern "C" int mww_last_invokes_slot(int slot) {
 }
 extern "C" float mww_last_prob_slot(int slot) {
   return (slot >= 0 && slot < kModelSlots) ? g_models[slot].max_prob : -1.0f;
+}
+extern "C" float mww_current_prob_slot(int slot) {
+  return (slot >= 0 && slot < kModelSlots) ? g_models[slot].current_prob : -1.0f;
 }

@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  workspace:
+    name: cargo test (host workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: leaf-peer
+
+      # Covers leaf-core, leaf-host and the vendored hypercore stack (incl. the
+      # v11 manifest golden vectors generated against JS hypercore 11.33.1).
+      # NOTE: leaf-esp32 is `exclude`d from the workspace and is NOT built here —
+      # it needs the Xtensa toolchain (esp-rs). Adding that job is tracked as
+      # Release 6.2 of the remediation plan; until then no CI compiles the
+      # firmware and a breaking change to it lands silently.
+      - name: Test host workspace
+        working-directory: leaf-peer
+        run: cargo test --workspace --no-fail-fast

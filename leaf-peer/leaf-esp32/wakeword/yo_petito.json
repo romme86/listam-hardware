@@ -4,10 +4,11 @@
   "model": "yo_petito.tflite",
   "trained": "2026-07-13 (microWakeWord, 30k synthetic multi-speaker positives with speech, domestic-noise, music, and RIR augmentation; bare petito included as a hard negative; 10k steps)",
   "command_window_ms": 8000,
-  "notes": "Extended command model. A match upgrades an already-open fast capture to the extended command window.",
+  "notes": "List-command model. The model itself is unchanged pending real yo-petito recordings; clean unamplified wake PCM and the two-hit detector also reduce its false positives. A match cancels any pending petito music action and opens the host command stream.",
   "micro": {
     "probability_cutoff": 0.30,
     "quantized_streaming_eval": { "false_reject": 0.009, "false_accepts_per_hour": 0.0 },
+    "consecutive_hits": 2,
     "sliding_window_size": 5,
     "feature_step_size_ms": 10,
     "features_per_frame": 40,

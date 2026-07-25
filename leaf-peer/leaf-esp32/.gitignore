@@ -2,3 +2,9 @@
 /.embuild
 cfg.toml
 sdkconfig
+/wakeword-recordings/
+/.training/
+
+# Python byte-cache from tools/ (wake-word capture + training helpers)
+__pycache__/
+*.pyc

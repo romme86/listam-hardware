@@ -23,9 +23,11 @@ use esp_idf_svc::hal::gpio::{AnyOutputPin, OutputPin};
 use leaf_core::{MirrorStorage, Registry, run_connection};
 use log::{error, info, warn};
 
+mod buzzer;
 mod config;
 mod led;
 mod provisioning;
+mod tunes;
 mod voice;
 
 #[toml_cfg::toml_config]
@@ -158,11 +160,15 @@ fn main() -> anyhow::Result<()> {
     // front-end; pick the pin from the effective config (runtime overrides baked).
     let led_gpio = runtime.as_ref().map(|rc| rc.led_gpio).unwrap_or(baked.led_gpio);
     // Claim the voice peripherals before WiFi consumes the modem (disjoint
-    // fields). i2s0 + GPIO4/5/6 (mic) + RMT ch0 + the LED pin are otherwise free.
+    // fields). I2S0 + GPIO4/5/6 (mic), LEDC timer/channel 0 + GPIO7 (piezo),
+    // and RMT ch0 + the LED pin are otherwise free.
     let voice_i2s = peripherals.i2s0;
     let voice_bclk = peripherals.pins.gpio4;
     let voice_din = peripherals.pins.gpio6;
     let voice_ws = peripherals.pins.gpio5;
+    let voice_buzzer_timer = peripherals.ledc.timer0;
+    let voice_buzzer_channel = peripherals.ledc.channel0;
+    let voice_buzzer_pin = peripherals.pins.gpio7;
     let voice_rmt = peripherals.rmt.channel0;
     let led_pin: AnyOutputPin = if led_gpio == 38 {
         peripherals.pins.gpio38.downgrade_output()
@@ -269,7 +275,8 @@ fn main() -> anyhow::Result<()> {
             .stack_size(16 * 1024)
             .spawn(move || {
                 voice::run(
-                    voice_i2s, voice_bclk, voice_din, voice_ws, voice_rmt, led_pin, audio_addr,
+                    voice_i2s, voice_bclk, voice_din, voice_ws, voice_rmt, led_pin,
+                    voice_buzzer_timer, voice_buzzer_channel, voice_buzzer_pin, audio_addr,
                     wake_thr, silence_ms, gain_shift,
                 )
             })?;

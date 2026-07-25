@@ -32,6 +32,11 @@ uint16_t mww_last_feat_peak(void);
 int mww_last_invokes_slot(int slot);
 float mww_last_prob_slot(int slot);
 
+/* Highest rolling probability produced during the most recent mww_process()
+ * call. Unlike mww_last_prob_slot(), this is not latched for the whole sound
+ * window and is therefore suitable for consecutive-hit wake decisions. */
+float mww_current_prob_slot(int slot);
+
 #ifdef __cplusplus
 }
 #endif

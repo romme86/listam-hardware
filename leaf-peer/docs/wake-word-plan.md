@@ -6,8 +6,9 @@ actually addressed — killing the ambient false-wakes we kept fighting with the
 `-40`/`-30`/`-37` threshold tuning.
 
 ## TL;DR decisions
-- Ship **`petito`** as the fast wake word and **`yo petito`** as the extended wake
-  word. Do not ship bare `yo`, whose short, common sound caused false accepts.
+- Ship **`petito`** as the local random-music wake word and **`yo petito`** as the
+  list-command wake word. Do not ship bare `yo`, whose short, common sound caused
+  false accepts.
 - Initial positives are synthetic multi-speaker **Piper** clips; negatives are
   pre-existing speech, music, domestic-noise, and room-impulse datasets. Bare
   `petito` positives are also hard negatives for the longer `yo petito` model.
@@ -18,27 +19,46 @@ actually addressed — killing the ambient false-wakes we kept fighting with the
 ## Shipping cascade (2026-07-13)
 
 The supported wake-word targets are **"petito"** and **"yo petito"**, with two
-deliberately different command-input modes:
+deliberately different actions:
 
-- **"petito" — fast command:** opens a maximum **4-second** command window for
-  short actions such as adding or removing one item.
-- **"yo petito" — extended command:** opens a maximum **8-second** command window
-  for longer item names, explicit list targets, or voice notes.
+- **"petito" — local music:** after a 900ms compound-wake disambiguation window,
+  pauses the microphone and plays a random built-in GPIO7 piezo tune. No audio
+  or wake event is sent to the host.
+- **"yo petito" — list command:** opens a maximum **8-second** host command
+  window for adding/removing items, explicit list targets, or voice notes.
 
 The shipping implementation runs two independent native microWakeWord models,
 `petito.tflite` and `yo_petito.tflite`, over one shared audio frontend. The dB
 gate only starts local inference: it does not light the LED, open a socket, or
 send audio to the host. Audio is retained in a bounded local pre-wake buffer and
-is streamed only after one of the native models crosses its five-sample rolling
+is streamed only after the `yo petito` model crosses its five-sample rolling
 probability threshold.
 
-The detected phrase is carried into capture state and selects the corresponding
-4- or 8-second maximum. A `yo petito` match can upgrade a capture that initially
-matched `petito`; normal trailing silence still ends either command early. The
-host retains its Whisper confirmation and also accepts the observed Italian
-transcription alias `io petito`, but host transcription is no longer the first
-wake gate. Ordinary sounds that fail both native models remain entirely on the
-Leaf and cannot create shopping-list items.
+A short-model match is held for 900ms because `yo petito` naturally contains
+`petito`; a compound-model match during that window cancels music and opens the
+host command stream. The host retains its Whisper confirmation and accepts the
+observed Italian transcription alias `io petito`, but bare `petito` is no longer
+an address phrase and cannot mutate a list. Ordinary sounds that fail both native
+models remain entirely on the Leaf.
+
+## Personalized `petito` retrain (2026-07-25)
+
+The local-music model now combines 6,000 phoneme-controlled, multi-speaker
+Piper clips with 29 clean recordings captured by the real Leaf microphone from
+three people. The real training subset is speaker-balanced through augmentation;
+four multi-person samples are held out for validation and four for testing. The
+official microWakeWord speech, dinner-party, music, and noise feature bundles
+remain the negative classes, so this artifact is for personal/non-commercial
+use because that convenient bundle is CC-BY-NC.
+
+The quantized streaming model uses a 0.62 probability cutoff, a five-inference
+rolling average, and two consecutive 64ms Leaf blocks above threshold. Its
+ambient benchmark at 0.62 is 0.562 false accepts/hour with 0.66% false rejects
+before the extra two-block firmware guard. With the Leaf's actual 256ms pre-roll,
+the old model passed 4/29 recorded utterances; the personalized model passes
+29/29, including every held-out voice sample. Wake inference now consumes clean
+unamplified PCM while the host STT path retains its digital gain, avoiding the
+7–71% clipping observed during the first calibration attempt.
 
 ## Data sourcing (the "record vs free" question)
 - **Positives:** `rhasspy/piper-sample-generator` (dscripka fork). Smoke test
