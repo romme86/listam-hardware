@@ -2,7 +2,7 @@ import process from 'node:process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { startBackend, createNodePlatform } from '@listam/backend'
-import { createBackendChannel } from '@listam/client'
+import { createBackendChannel, decodeSyncListSnapshot } from '@listam/client'
 import { RPC_ADD, RPC_JOIN_KEY } from '@listam/protocol'
 import { SerialPort } from 'serialport'
 import { ReadlineParser } from '@serialport/parser-readline'
@@ -27,7 +27,8 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 
 const PORT = args.port || '/dev/cu.usbmodem1234561'
-const BAUD = parseInt(args.baud || '115200', 10)
+const BAUD = Number(args.baud || '115200')
+if (!Number.isInteger(BAUD) || BAUD <= 0) throw new Error('--baud must be a positive integer')
 const INVITE = args.invite || null
 const STORAGE = path.resolve(__dirname, args.storage || './storage')
 
@@ -56,7 +57,13 @@ channel.client.onEvent((event) => {
     }
 
     if (event.type === 'sync-list') {
-        state.items = Array.isArray(event.items) ? event.items : []
+        const snapshot = decodeSyncListSnapshot(event.items)
+        if (!snapshot) return
+        if (snapshot.mode === 'bucket') {
+            const inBucket = (i) => (i?.baseKey ?? null) === snapshot.baseKey
+                && i?.listId === snapshot.listId && i?.listType === snapshot.listType
+            state.items = [...snapshot.items, ...state.items.filter((i) => !inBucket(i))]
+        } else state.items = snapshot.items
         console.log(`[Listam] Synced! List has ${state.items.length} items.`)
     }
 
@@ -137,7 +144,8 @@ parser.on('data', async (line) => {
         if (itemText) {
             console.log(`[Bridge] Dispatched add request for: "${itemText}"`)
             try {
-                await channel.client.send(RPC_ADD, { text: itemText })
+                const reply = JSON.parse(await channel.client.send(RPC_ADD, { text: itemText }))
+                if (reply?.ok !== true) throw new Error(reply?.reason || 'backend refused the item')
                 console.log(`[Bridge] RPC_ADD succeeded for: "${itemText}"`)
             } catch (err) {
                 console.error(`[Bridge] RPC_ADD failed:`, err.message)
@@ -150,6 +158,7 @@ port.open((err) => {
     if (err) {
         console.error(`[Serial] Failed to open port: ${err.message}`)
         console.error('Please make sure the ESP32-S3 is connected and port path is correct.')
+        void shutdown(1)
     } else {
         console.log(`[Serial] Connected! Reading data...`)
     }
@@ -164,11 +173,14 @@ port.on('error', (err) => {
 })
 
 // 5. Clean Shutdown
-async function shutdown() {
+let closing = false
+async function shutdown(exitCode = 0) {
+    if (closing) return
+    closing = true
     console.log('\n[Bridge] Shutting down...')
     
     if (port.isOpen) {
-        port.close()
+        await new Promise((resolve) => port.close(() => resolve()))
     }
     
     try {
@@ -178,8 +190,8 @@ async function shutdown() {
         console.error('[Listam] Error during backend shutdown:', err.message)
     }
     
-    process.exit(0)
+    process.exit(exitCode)
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => shutdown())
+process.on('SIGTERM', () => shutdown())

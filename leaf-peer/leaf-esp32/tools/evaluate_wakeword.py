@@ -96,7 +96,20 @@ def main() -> None:
             f"{model_path.stem}: two-block avg{args.window} "
             f"min={values.min():.4f} median={np.median(values):.4f} max={values.max():.4f}"
         )
-        for threshold in (0.10, 0.15, 0.20, 0.21, 0.25, 0.30, 0.40, 0.50):
+        for threshold in (
+            0.10,
+            0.15,
+            0.20,
+            0.21,
+            0.25,
+            0.30,
+            0.40,
+            0.50,
+            0.62,
+            0.75,
+            0.78,
+            0.80,
+        ):
             print(f"  >= {threshold:.2f}: {int((values >= threshold).sum())}/{len(values)}")
 
 

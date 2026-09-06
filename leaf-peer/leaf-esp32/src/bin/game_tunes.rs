@@ -1,4 +1,4 @@
-//! Standalone five-tune GPIO7 piezo player.
+//! Standalone 25-tune GPIO7 piezo player.
 //!
 //! Flash this binary only for a music demo. The normal Leaf firmware remains
 //! the default build. Tap BOOT/GPIO0 to play the named tune shown in the serial

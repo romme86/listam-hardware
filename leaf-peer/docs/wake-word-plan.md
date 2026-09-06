@@ -60,6 +60,21 @@ the old model passed 4/29 recorded utterances; the personalized model passes
 unamplified PCM while the host STT path retains its digital gain, avoiding the
 7–71% clipping observed during the first calibration attempt.
 
+### Person 3 extension (2026-08-11)
+
+Three isolated `petito` utterances from Person 3 were imported from a phone MP3
+as corpus samples 30–32 (mono 16 kHz PCM16, 1.8 seconds, peak-normalized to
+-3 dBFS). The previous deployed model accepted 0/3 at its 0.62 device cutoff.
+Fine-tuning the proven July model was materially better than replacing it with a
+fresh model: the selected quantized artifact accepts 32/32 real recordings at a
+0.78 cutoff, including 3/3 new Person 3 samples. The minimum simulated two-block
+score is 0.7953 overall and 0.8298 for the three new clips.
+
+The official streaming ROC reports 0.99% false rejects at both neighboring
+cutoffs; false accepts are 1.50/hour at 0.77 and 1.125/hour at 0.80, before the
+Leaf's extra requirement for two consecutive 64ms blocks. The production 0.78
+cutoff retains every recorded voice while staying inside those measured bounds.
+
 ## Data sourcing (the "record vs free" question)
 - **Positives:** `rhasspy/piper-sample-generator` (dscripka fork). Smoke test
   `--max-samples 1`, then generate **30k-50k+** for a short word (notebook default

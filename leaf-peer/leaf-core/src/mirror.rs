@@ -44,6 +44,7 @@ pub struct CoreHandle {
 pub struct Registry {
     storage: MirrorStorage,
     cores: Arc<Mutex<HashMap<[u8; 32], Arc<CoreHandle>>>>,
+    opening: Arc<Mutex<()>>,
 }
 
 impl Registry {
@@ -51,6 +52,7 @@ impl Registry {
         Registry {
             storage,
             cores: Arc::new(Mutex::new(HashMap::new())),
+            opening: Arc::new(Mutex::new(())),
         }
     }
 
@@ -61,6 +63,11 @@ impl Registry {
         key: [u8; 32],
         is_control: bool,
     ) -> anyhow::Result<Option<Arc<CoreHandle>>> {
+        // Two connections may announce the same core concurrently. Serialize
+        // check/open/insert so they never open independent writers on one store.
+        // Keep this separate from `cores`: readers must not hold the registry
+        // lock while waiting on storage or on a core's own lock.
+        let _opening = self.opening.lock().await;
         let dkey = discovery_key(&key);
         {
             let cores = self.cores.lock().await;

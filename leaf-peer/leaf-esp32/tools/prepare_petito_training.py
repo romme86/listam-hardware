@@ -240,6 +240,13 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    # The trainer may be launched from its own checkout rather than the Leaf
+    # directory, so persist absolute paths in the generated YAML.
+    args.leaf_root = args.leaf_root.resolve()
+    args.synthetic_root = args.synthetic_root.resolve()
+    args.negative_root = args.negative_root.resolve()
+    args.output = args.output.resolve()
+
     dataset = (
         args.leaf_root
         / "wakeword-recordings"
@@ -277,7 +284,13 @@ def main() -> None:
         )
 
     config_path = write_config(args.output, feature_root, args.negative_root)
-    print(f"Prepared {len(synthetic_paths)} synthetic and 29 real samples")
+    real_sample_count = sum(
+        1 for _ in dataset.glob("petito_*.wav")
+    )
+    print(
+        f"Prepared {len(synthetic_paths)} synthetic and "
+        f"{real_sample_count} real samples"
+    )
     print(config_path)
 
 

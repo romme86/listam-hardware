@@ -1,14 +1,28 @@
 {
   "wake_word": "petito",
   "model": "petito.tflite",
-  "trained": "2026-07-25 (microWakeWord, 6k multi-speaker Piper positives plus 29 clean on-device recordings from 3 people; speaker-balanced augmentation; speech, dinner-party, music, and noise negatives; 16k steps)",
-  "local_action": "random_game_tune",
+  "trained": "2026-08-11 (microWakeWord, fine-tuned 4k steps from the 2026-07-25 model with 6k Piper positives plus 32 real recordings; the three additions are isolated Person 3 phone recordings; speaker-balanced augmentation and speech, dinner-party, music, and noise negatives)",
+  "model_sha256": "a016e4c99cf9a6540b5c6933687048d616df8613c1a5dcb4047f95e8d4416f3a",
+  "local_action": "non_repeating_random_tune",
   "disambiguation_ms": 900,
-  "notes": "Local music model. Personal/non-commercial training because the convenient negative feature bundle is CC-BY-NC. A standalone match plays a random GPIO7 tune after allowing yo_petito to override it; no audio is streamed.",
+  "notes": "Local music model. Personal/non-commercial training because the convenient negative feature bundle is CC-BY-NC. A standalone match plays the next tune in a randomized 25-song cycle after allowing yo_petito to override it; every song is played before the cycle is reshuffled and no audio is streamed.",
   "micro": {
-    "probability_cutoff": 0.62,
-    "quantized_streaming_eval": { "false_reject": 0.0066, "false_accepts_per_hour": 0.562 },
-    "real_device_eval": { "accepted": 29, "total": 29, "pre_roll_ms": 256, "minimum_two_block_score": 0.6502 },
+    "probability_cutoff": 0.78,
+    "quantized_streaming_eval": {
+      "false_reject": 0.0099,
+      "false_accepts_per_hour_upper_bound": 1.5,
+      "roc_neighbors": {
+        "0.77": { "false_reject": 0.0099, "false_accepts_per_hour": 1.5 },
+        "0.80": { "false_reject": 0.0099, "false_accepts_per_hour": 1.125 }
+      }
+    },
+    "real_device_eval": {
+      "accepted": 32,
+      "total": 32,
+      "pre_roll_ms": 256,
+      "minimum_two_block_score": 0.7953,
+      "new_person_3": { "accepted": 3, "total": 3, "minimum_two_block_score": 0.8298 }
+    },
     "consecutive_hits": 2,
     "sliding_window_size": 5,
     "feature_step_size_ms": 10,

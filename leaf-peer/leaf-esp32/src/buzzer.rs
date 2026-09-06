@@ -12,6 +12,8 @@ use crate::tunes::{Note, Tune, GAME_TUNES};
 pub struct Buzzer<'d> {
     driver: LedcDriver<'d>,
     half_duty: u32,
+    tune_order: [usize; GAME_TUNES.len()],
+    next_tune: usize,
     last_tune: Option<usize>,
 }
 
@@ -21,11 +23,31 @@ impl<'d> Buzzer<'d> {
         let mut driver = LedcDriver::new(channel, timer, pin)?;
         driver.set_duty(0)?;
         let half_duty = driver.get_max_duty() / 2;
+        let mut tune_order = [0; GAME_TUNES.len()];
+        for (index, slot) in tune_order.iter_mut().enumerate() {
+            *slot = index;
+        }
+        Self::shuffle(&mut tune_order, None);
+
         Ok(Self {
             driver,
             half_duty,
+            tune_order,
+            next_tune: 0,
             last_tune: None,
         })
+    }
+
+    fn shuffle(order: &mut [usize], avoid_first: Option<usize>) {
+        for index in (1..order.len()).rev() {
+            let swap_with = unsafe { esp_idf_svc::sys::esp_random() as usize } % (index + 1);
+            order.swap(index, swap_with);
+        }
+
+        // A new cycle may not begin with the tune that ended the previous one.
+        if order.len() > 1 && avoid_first == Some(order[0]) {
+            order.swap(0, 1);
+        }
     }
 
     fn set_frequency(frequency: u32) -> Result<()> {
@@ -65,13 +87,16 @@ impl<'d> Buzzer<'d> {
     }
 
     pub fn play_random(&mut self) -> Result<Tune> {
-        let mut index = unsafe { esp_idf_svc::sys::esp_random() as usize } % GAME_TUNES.len();
-        if GAME_TUNES.len() > 1 && self.last_tune == Some(index) {
-            index = (index + 1) % GAME_TUNES.len();
+        if self.next_tune == self.tune_order.len() {
+            Self::shuffle(&mut self.tune_order, self.last_tune);
+            self.next_tune = 0;
         }
-        self.last_tune = Some(index);
+
+        let index = self.tune_order[self.next_tune];
         let tune = GAME_TUNES[index];
         self.play(tune)?;
+        self.next_tune += 1;
+        self.last_tune = Some(index);
         Ok(tune)
     }
 }
